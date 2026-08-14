@@ -121,7 +121,8 @@ def _build_pipeline(settings: Settings, api_key: str, inject: bool):
 
     cleaner = None
     if settings.cleanup_model and not settings.local_engine:
-        cleaner = CleanupClient(api_key, model=settings.cleanup_model)
+        cleaner = CleanupClient(api_key, model=settings.cleanup_model,
+                                mode=settings.cleanup_mode)
     injector = TextInjector() if inject else None
     return transcriber, cleaner, injector
 

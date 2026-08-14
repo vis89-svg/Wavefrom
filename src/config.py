@@ -47,6 +47,7 @@ class Settings:
     mode: str = "hold"  # hold | tap
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
+    cleanup_mode: str = "correcting"  # correcting | conservative
     language: str | None = None
     sample_rate: int = DEFAULT_SAMPLE_RATE
     toasts: bool = True
@@ -70,6 +71,7 @@ class Settings:
     mode: str = "hold"  # hold | tap
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
+    cleanup_mode: str = "correcting"  # correcting | conservative
     language: str | None = None
     sample_rate: int = DEFAULT_SAMPLE_RATE
     toasts: bool = True
@@ -98,6 +100,8 @@ def load_settings() -> Settings:
     s = Settings(**{**asdict(Settings()), **valid})
     if s.mode not in ("hold", "tap"):
         s.mode = "hold"
+    if s.cleanup_mode not in ("correcting", "conservative"):
+        s.cleanup_mode = "correcting"
     return s
 
 
@@ -213,4 +217,8 @@ def load_config() -> Settings:
     cleanup = os.getenv("CLEANUP_MODEL", "").strip()
     if cleanup:
         kwargs["cleanup_model"] = None if cleanup.lower() == "none" else cleanup
+    # CLEANUP_MODE
+    cleanup_mode = os.getenv("CLEANUP_MODE", "").strip().lower()
+    if cleanup_mode in ("correcting", "conservative"):
+        kwargs["cleanup_mode"] = cleanup_mode
     return Settings(**kwargs)
