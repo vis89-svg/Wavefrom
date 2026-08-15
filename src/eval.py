@@ -89,6 +89,7 @@ def evaluate(engine: DictationEngine, wav_bytes: bytes,
         "words_reference": len(words(reference)),
         "words_output": len(words(output)),
         "dropped_sentences": dropped,
+        "disputed_blocks": _dispute_count(engine),
     }
 
 
@@ -111,12 +112,19 @@ def _build_engine(settings: Settings, api_key: str) -> DictationEngine:
                            injector=None, notify=None, tray=None)
 
 
+def _dispute_count(engine: DictationEngine) -> int:
+    """How many substitution-sized disagreements the last dictation found."""
+    return len(getattr(engine, "_last_disputes", []))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wav", type=Path)
     parser.add_argument("reference", type=Path)
     parser.add_argument("--local", action="store_true", help="use local faster-whisper")
     parser.add_argument("--skip-cleanup", action="store_true")
+    parser.add_argument("--no-verify", action="store_true",
+                        help="skip the two-model verify/reconcile pass")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -132,6 +140,8 @@ def main() -> int:
         settings.local_engine = True
     if args.skip_cleanup:
         settings.cleanup_model = None
+    if args.no_verify:
+        settings.verify = False
     api_key = get_api_key()
     problems = validate(settings, api_key)
     if problems and not settings.local_engine:
@@ -148,6 +158,7 @@ def main() -> int:
         print(f"word error rate:      {result['wer']:.1%}")
         print(f"sentence recall:      {result['sentence_recall']:.1%} "
               f"({result['words_reference'] - result['words_output']:+d} words)")
+        print(f"disputed blocks:      {result['disputed_blocks']}")
         if result["dropped_sentences"]:
             print("DROPPED sentences:")
             for s in result["dropped_sentences"]:

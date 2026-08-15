@@ -18,7 +18,8 @@ from dataclasses import dataclass
 import numpy as np
 import sounddevice as sd
 
-from src.merge import PUNCT, diff_plan, ensure_period, merge_segments, union_text
+from src.merge import (PUNCT, _norm, apply_disputes, diff_plan, ensure_period,
+                       find_disputed_blocks, merge_segments, union_text)
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,21 @@ MAX_SILENCE_SECS = 3.0
 MAX_RECORD_SECS = 120.0
 FINAL_CHUNK_SECS = 30.0
 FINAL_CHUNK_OVERLAP_SECS = 2.0
+_LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
+
+
+def _low_conf_words(result) -> set[str]:
+    """Normalized words from segments with an uncertain decode (low logprob).
+
+    These are the regions most likely to contain substitutions or
+    hallucinations; the reconciliation prompt uses the set to tell the LLM
+    which candidate the audio itself thought was shaky.
+    """
+    low: set[str] = set()
+    for seg in getattr(result, "segments", []):
+        if seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONF_LOGPROB:
+            low.update(_norm(w) for w in seg.text.split())
+    return low
 
 
 @dataclass
@@ -55,6 +71,7 @@ class DictationEngine:
         self._committed: list[str] = []
         self._typed_text = ""
         self._full_audio: bytes | None = None
+        self._last_disputes: list = []
         self._active = threading.Event()
         self._stop_capture = threading.Event()
         self._worker: threading.Thread | None = None
@@ -219,8 +236,11 @@ class DictationEngine:
             self._status.state = "transcribing"
             self._notify_tray()
             try:
-                full_text = self._transcribe_full_audio(wav_bytes)
+                full_text, primary_low = self._transcribe_full_audio(wav_bytes)
                 if full_text and full_text.strip():
+                    if self._verify_enabled():
+                        full_text = self._verify_and_reconcile(
+                            full_text, primary_low, wav_bytes)
                     # The chunked full-audio pass is the primary transcript;
                     # the slice-level result is folded in as secondary so any
                     # sentence one pass missed is recovered by the other.
@@ -271,31 +291,107 @@ class DictationEngine:
             parts.append(" ".join(self._committed[-tail:]))
         return " ".join(parts) if parts else None
 
-    def _transcribe_full_audio(self, wav_bytes: bytes) -> str:
+    def _transcribe_full_audio(self, wav_bytes: bytes, model: str | None = None,
+                               temperature: float | None = None
+                               ) -> tuple[str, set[str]]:
         """Chunked transcription of the whole recording.
 
         The full utterance is split into overlapping FINAL_CHUNK_SECS windows
         and each is transcribed separately; the overlap-diff merge then stitches
         them into one transcript. Long single-pass Whisper calls are the classic
         cause of dropped sentences, so we never rely on one call over long audio.
+
+        Returns (text, low_conf_words). `model`/`temperature` override the
+        decode (used by the verify pass). `low_conf_words` holds normalized
+        words from segments whose average log probability suggests an uncertain
+        decode — useful for adjudicating disagreements.
         """
         pcm, rate = pcm_from_wav(wav_bytes)
         if len(pcm) == 0:
-            return ""
+            return "", set()
         chunk_len = int(rate * FINAL_CHUNK_SECS)
         overlap = int(rate * FINAL_CHUNK_OVERLAP_SECS)
         min_len = int(rate * 1.0)
         committed: list[str] = []
+        low_conf: set[str] = set()
         i = 0
         while i < len(pcm):
             window = pcm[i:i + chunk_len]
             if len(window) >= min_len:
-                text = self._transcriber.transcribe_bytes(
-                    _to_wav(window, rate), language=self._config.language,
-                    prompt=self._context_prompt(tail=24))
+                kwargs: dict = {
+                    "language": self._config.language,
+                    "prompt": self._context_prompt(tail=24),
+                }
+                if not self._local:
+                    kwargs["verbose"] = True
+                    if model is not None:
+                        kwargs["model"] = model
+                    if temperature is not None:
+                        kwargs["temperature"] = temperature
+                result = self._transcriber.transcribe_bytes(_to_wav(window, rate),
+                                                             **kwargs)
+                if isinstance(result, str):
+                    text = result
+                else:  # TranscriptResult with confidence metadata
+                    text = result.text
+                    low_conf.update(_low_conf_words(result))
                 committed, _ = merge_segments(committed, text, max_overlap=24)
             i += chunk_len - overlap
-        return " ".join(committed)
+        return " ".join(committed), low_conf
+
+    # -------------------------------------------------- verify / reconciliation
+    def _verify_enabled(self) -> bool:
+        """Verify pass needs a second decode + an LLM to adjudicate disputes."""
+        return (bool(getattr(self._config, "verify", True))
+                and not self._local
+                and self._cleaner is not None)
+
+    def _verify_model(self) -> str:
+        verify_model = getattr(self._config, "verify_model", None)
+        if verify_model:
+            return verify_model
+        primary = getattr(self._config, "whisper_model", "") or ""
+        if primary == "whisper-large-v3-turbo":
+            return "whisper-large-v3"
+        return "whisper-large-v3-turbo"
+
+    def _verify_and_reconcile(self, full_text: str, primary_low: set[str],
+                              wav_bytes: bytes) -> str:
+        """Cross-check the primary full pass against a second model decode.
+
+        Where the two transcripts substitute different wording for the same
+        audio, the cleanup LLM picks the wording that fits the context; the
+        chosen candidate is spliced into the primary text. Any failure keeps
+        the primary text (never a fabricated third option).
+        """
+        try:
+            verify_text, verify_low = self._transcribe_full_audio(
+                wav_bytes, model=self._verify_model(), temperature=0.2)
+        except Exception as e:
+            log.warning("Verify pass failed, using primary: %s", e)
+            self._last_disputes = []
+            return full_text
+        if not verify_text.strip():
+            self._last_disputes = []
+            return full_text
+
+        disputes = find_disputed_blocks(full_text, verify_text,
+                                        primary_low=primary_low,
+                                        verify_low=verify_low)
+        self._last_disputes = disputes
+        if not disputes:
+            return full_text
+        log.info("Verify pass found %d disputed block(s)", len(disputes))
+        try:
+            choices = self._cleaner.reconcile(disputes)
+        except Exception as e:
+            log.warning("Reconcile failed, keeping primary: %s", e)
+            choices = {}
+        reconciled = apply_disputes(full_text, disputes, choices)
+        if reconciled != full_text:
+            log.info("Reconciled %d dispute(s) into final transcript",
+                     sum(1 for _ in disputes))
+        return reconciled
 
     def dictate_bytes(self, audio_bytes: bytes) -> str:
         """Offline one-shot dictation of a WAV payload (used by eval/tests).

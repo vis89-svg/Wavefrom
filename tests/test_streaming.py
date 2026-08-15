@@ -227,10 +227,11 @@ def test_full_audio_chunked_into_overlapping_windows():
 
 
 class _FakeStream:
-    def __init__(self, chunk, speak_chunks, silent_chunks):
+    def __init__(self, chunk, speak_chunks, silent_chunks, resume_speak=0):
         self._chunk = chunk
         self._speak = speak_chunks
         self._silent = silent_chunks
+        self._resume = resume_speak
 
     def __enter__(self):
         return self
@@ -245,6 +246,9 @@ class _FakeStream:
         if self._silent > 0:
             self._silent -= 1
             return np.zeros(n, dtype=np.int16), None
+        if self._resume > 0:
+            self._resume -= 1
+            return (np.sin(np.arange(n) / 8) * 8000).astype(np.int16), None
         raise StopIteration
 
 
@@ -263,6 +267,42 @@ def test_hold_mode_ignores_silence_autostop(monkeypatch):
     # 120 silent chunks (~3.6s) exceeds MAX_SILENCE_SECS, but hold mode must
     # keep recording (only hotkey release / MAX_RECORD_SECS ends capture).
     assert not engine._stop_capture.is_set()
+
+
+def test_hold_mode_capture_survives_pause_then_resumes(monkeypatch):
+    rate = 16000
+    chunk = int(rate * 0.03)
+    engine = make_engine(FakeTranscriber(["hello world"]))
+    # Speak, then ~4s of silence (far beyond SILENCE_PERIOD_SECS), then speak
+    # again. Hold mode must still be recording after the resumed speech.
+    monkeypatch.setattr("src.streaming.sd.InputStream",
+                        lambda **kw: _FakeStream(chunk, speak_chunks=10,
+                                                 silent_chunks=134,
+                                                 resume_speak=10))
+    engine.start()
+    try:
+        engine.capture()
+    except StopIteration:
+        pass
+    assert not engine._stop_capture.is_set()
+
+
+def test_pause_period_does_not_drop_post_pause_content():
+    # A >1s pause sets _pending_period (a "." is typed at the pause). The
+    # resumed speech slice must still be merged and kept — content spoken after
+    # the pause is never lost.
+    transcriber = FakeTranscriber([
+        "",                     # silence during the pause
+        "and then more",        # speech resumed after the pause
+    ])
+    engine = make_engine(transcriber, None)
+    engine._committed = ["hello", "world"]
+    engine._pending_period = True
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert " ".join(engine._committed) == "hello world . and then more"
 
 
 def test_tap_mode_stops_after_silence(monkeypatch):
@@ -338,3 +378,91 @@ def test_no_hint_and_empty_committed_omits_prompt():
     engine._worker.join(timeout=5)
 
     assert transcriber.kwargs[0]["prompt"] is None
+
+
+class FakeCleaner:
+    def __init__(self, choices=None):
+        self.choices = choices or {}
+        self.reconciled = None
+
+    def clean(self, raw):
+        return raw
+
+    def reconcile(self, disputes):
+        self.reconciled = disputes
+        return self.choices
+
+
+def test_verify_pass_reconciles_substitution():
+    # slice: "hello world"; primary full pass mis-hears "four web apps are";
+    # verify pass hears "whole app is" and reconciliation picks B.
+    transcriber = FakeTranscriber([
+        "hello world",                          # slice
+        "hello the four web apps are gone",     # primary full chunk
+        "hello the whole app is gone",          # verify chunk (alt model)
+    ])
+    engine = make_engine(transcriber, None)
+    engine._cleaner = FakeCleaner(choices={0: "B"})
+
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    # 3 transcribe calls: slice + primary chunk + verify chunk
+    assert len(transcriber.calls) == 3
+    # verify chunk used the alternate model at higher temperature
+    assert transcriber.kwargs[2]["model"] == "whisper-large-v3"
+    assert transcriber.kwargs[2]["temperature"] == 0.2
+    assert len(engine._last_disputes) == 1
+    # reconciled: verify wording chosen, hallucinated "four web apps" gone
+    assert "whole app is gone" in engine.status.committed_text
+    assert "four web apps" not in engine.status.committed_text
+
+
+def test_verify_skipped_when_disabled():
+    transcriber = FakeTranscriber([
+        "hello world",
+        "hello the four web apps are gone",
+    ])
+    engine = make_engine(transcriber, None)
+    engine._config.verify = False
+    engine._cleaner = FakeCleaner()
+
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert len(transcriber.calls) == 2  # no verify chunk
+    assert engine._last_disputes == []
+    assert "four web apps" in engine.status.committed_text
+
+
+def test_verify_reconcile_failure_keeps_primary():
+    # If reconciliation throws, the primary wording must survive untouched.
+    transcriber = FakeTranscriber([
+        "hello world",
+        "hello the four web apps are gone",
+        "hello the whole app is gone",
+    ])
+    engine = make_engine(transcriber, None)
+
+    class BoomCleaner:
+        def clean(self, raw):
+            return raw
+
+        def reconcile(self, disputes):
+            raise RuntimeError("boom")
+
+    engine._cleaner = BoomCleaner()
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert len(engine._last_disputes) == 1
+    assert "four web apps" in engine.status.committed_text

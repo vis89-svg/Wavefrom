@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import difflib
 import os
+from dataclasses import dataclass
 
 PUNCT = ".!?…;:,"
 
@@ -150,6 +151,131 @@ def _align(a: list[str], b: list[str]) -> list[tuple[str, str]]:
 
 def common_prefix_len(a: str, b: str) -> int:
     return len(os.path.commonprefix([a, b]))
+
+
+@dataclass
+class Dispute:
+    """A block where two independent transcriptions of the same audio differ.
+
+    `primary_text`/`verify_text` are the two candidate wordings; `prefix` and
+    `suffix` are the surrounding primary text for LLM adjudication.
+    """
+    index: int
+    prefix: str
+    primary_text: str
+    verify_text: str
+    suffix: str
+    primary_start: int = 0
+    primary_end: int = 0
+    primary_low_conf: bool = False
+    verify_low_conf: bool = False
+
+
+def _word_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) char offsets of each whitespace-separated token."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        while i < n and text[i].isspace():
+            i += 1
+        start = i
+        while i < n and not text[i].isspace():
+            i += 1
+        if i > start:
+            spans.append((start, i))
+    return spans
+
+
+def find_disputed_blocks(primary: str, verify: str,
+                         min_block_words: int = 2, max_blocks: int = 12,
+                         primary_low: set[str] | None = None,
+                         verify_low: set[str] | None = None) -> list[Dispute]:
+    """Find substitution-sized disagreements between two full transcripts.
+
+    A dispute is a stretch where both passes said *something different* for the
+    same audio. Opaque diffs are merged into blocks: short equal runs inside a
+    differing stretch (e.g. the shared "the" in "on the back end" vs "in the
+    list") stay part of the block, while equal runs of >= 2 words split
+    disputes apart. A block qualifies when it contains at least one `replace`
+    and >= `min_block_words` differing words. Single-word differences
+    (homophones) are deliberately ignored — the correcting pass handles those.
+    Confidence: `primary_low`/`verify_low` are sets of normalized words from
+    low-confidence segments; matching words mark the candidate as uncertain.
+    """
+    aw = tokenize(primary)
+    bw = tokenize(verify)
+    an = [_norm(w) for w in aw]
+    bn = [_norm(w) for w in bw]
+    a_spans = _word_spans(primary)
+    b_spans = _word_spans(verify)
+    primary_low = primary_low or set()
+    verify_low = verify_low or set()
+
+    opcodes = list(difflib.SequenceMatcher(None, an, bn).get_opcodes())
+    segments: list[list[tuple]] = []
+    cur: list[tuple] = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            if cur and (i2 - i1) >= 2:
+                segments.append(cur)
+                cur = []
+            elif cur:
+                cur.append((tag, i1, i2, j1, j2))
+            continue
+        cur.append((tag, i1, i2, j1, j2))
+    if cur:
+        segments.append(cur)
+
+    disputes: list[Dispute] = []
+    for seg in segments:
+        non_eq = [op for op in seg if op[0] != "equal"]
+        if not any(op[0] == "replace" for op in non_eq):
+            continue
+        diff_a = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in seg
+                     if tag in ("replace", "delete"))
+        diff_b = sum(j2 - j1 for tag, _i1, _i2, j1, j2 in seg
+                     if tag in ("replace", "insert"))
+        if max(diff_a, diff_b) < min_block_words:
+            continue
+        a1 = non_eq[0][1]
+        a2 = non_eq[-1][2]
+        b1 = non_eq[0][3]
+        b2 = non_eq[-1][4]
+        a_start = a_spans[a1][0] if a1 < len(a_spans) else len(primary)
+        a_end = a_spans[a2 - 1][1] if a2 > 0 else a_start
+        b_start = b_spans[b1][0] if b1 < len(b_spans) else len(verify)
+        b_end = b_spans[b2 - 1][1] if b2 > 0 else b_start
+        disputes.append(Dispute(
+            index=len(disputes),
+            prefix=primary[:a_start],
+            primary_text=primary[a_start:a_end],
+            verify_text=verify[b_start:b_end],
+            suffix=primary[a_end:],
+            primary_start=a_start,
+            primary_end=a_end,
+            primary_low_conf=bool(primary_low.intersection(an[a1:a2])),
+            verify_low_conf=bool(verify_low.intersection(bn[b1:b2])),
+        ))
+        if len(disputes) >= max_blocks:
+            break
+    return disputes
+
+
+def apply_disputes(primary: str, disputes: list[Dispute],
+                   choices: dict[int, str]) -> str:
+    """Splice the chosen wording into the primary text.
+
+    `choices` maps dispute index -> "A" (keep primary wording) or "B" (use the
+    verify wording). Anything else defaults to the primary wording, so the
+    result never contains words from outside the two audio-grounded candidates.
+    """
+    if not disputes:
+        return primary
+    result = primary
+    for d in sorted(disputes, key=lambda d: d.primary_start, reverse=True):
+        chosen = d.verify_text if choices.get(d.index) == "B" else d.primary_text
+        result = result[:d.primary_start] + chosen + result[d.primary_end:]
+    return result
 
 
 def diff_plan(old_text: str, new_text: str) -> tuple[int, str]:

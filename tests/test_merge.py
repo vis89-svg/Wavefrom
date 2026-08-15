@@ -1,6 +1,7 @@
 """Unit tests for overlap-diff merging."""
-from src.merge import (common_prefix_len, diff_plan, ensure_period,
-                       merge_segments, union_text)
+from src.merge import (apply_disputes, common_prefix_len, diff_plan,
+                       ensure_period, find_disputed_blocks, merge_segments,
+                       union_text)
 
 
 def test_merge_appends_new_tail():
@@ -119,3 +120,83 @@ def test_merge_segments_max_overlap_cap():
     # Without a cap the run is claimed and 'k' is the only new tail.
     merged2, appended2 = merge_segments(committed, new)
     assert appended2 == "k"
+
+
+def test_disputes_none_when_identical():
+    assert find_disputed_blocks("the quick brown fox", "the quick brown fox") == []
+
+
+def test_disputes_ignore_single_word_diff():
+    # One-word differences (homophones) are the correcting pass's job.
+    assert find_disputed_blocks(
+        "build a basic login system",
+        "build a basic logging system") == []
+
+
+def test_disputes_detect_semantic_substitution():
+    primary = "If we lose the database the four web applications would be gone"
+    verify = "If we lose the database the whole application is basically gone"
+    disputes = find_disputed_blocks(primary, verify)
+    assert len(disputes) == 1
+    d = disputes[0]
+    assert d.primary_text == "four web applications would be"
+    assert d.verify_text == "whole application is basically"
+    assert d.prefix == "If we lose the database the "
+    assert d.suffix == " gone"
+    assert d.index == 0
+
+
+def test_disputes_merge_short_shared_words():
+    # "on the back end" vs "in the list" shares "the"; the whole substitution
+    # must stay one dispute block instead of fragmenting into 1-word diffs.
+    primary = "the customer should immediately appear on the back end without refreshing"
+    verify = "the customer should immediately appear in the list without refreshing"
+    disputes = find_disputed_blocks(primary, verify)
+    assert len(disputes) == 1
+    d = disputes[0]
+    assert d.prefix == "the customer should immediately appear "
+    assert d.suffix == " without refreshing"
+    assert "on the back end" in d.primary_text
+    assert "in the list" in d.verify_text
+
+
+def test_disputes_low_conf_flags():
+    primary = "we lost the business strategy team"
+    verify = "we lost the business logic module"
+    disputes = find_disputed_blocks(
+        primary, verify, primary_low={"business", "strategy"})
+    assert len(disputes) == 1
+    assert disputes[0].primary_low_conf is True
+    assert disputes[0].verify_low_conf is False
+
+
+def test_disputes_multiple_blocks_and_cap():
+    primary = "a w x b c d y z"
+    verify = "a p q b c d r s"
+    disputes = find_disputed_blocks(primary, verify)
+    assert len(disputes) == 2
+    assert [d.primary_text for d in disputes] == ["w x", "y z"]
+    capped = find_disputed_blocks(primary, verify, max_blocks=1)
+    assert len(capped) == 1
+
+
+def test_apply_disputes_keeps_primary_by_default():
+    primary = "the four web applications would be gone now"
+    verify = "the whole application is basically gone now"
+    disputes = find_disputed_blocks(primary, verify)
+    assert apply_disputes(primary, disputes, {}) == primary
+
+
+def test_apply_disputes_splices_verify_choice():
+    primary = "If we lose the database the four web applications would be gone"
+    verify = "If we lose the database the whole application is basically gone"
+    disputes = find_disputed_blocks(primary, verify)
+    out = apply_disputes(primary, disputes, {0: "B"})
+    assert out == "If we lose the database the whole application is basically gone"
+    # choosing A (or anything non-B) keeps the primary wording
+    assert apply_disputes(primary, disputes, {0: "A"}) == primary
+    assert apply_disputes(primary, disputes, {0: "C"}) == primary
+
+
+def test_apply_disputes_no_disputes_is_identity():
+    assert apply_disputes("hello world", [], {}) == "hello world"

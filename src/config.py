@@ -57,6 +57,8 @@ class Settings:
     local_model: str = "small"
     vad_filter: bool = False  # local engine only; off = keep all spoken content
     domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
+    verify: bool = True       # cross-check final pass with a second model
+    verify_model: str | None = None  # None = pick the other large Whisper model
     version: int = 2
     groq_api_key: str = ""
 
@@ -83,6 +85,8 @@ class Settings:
     local_model: str = "small"
     vad_filter: bool = False  # local engine only; off = keep all spoken content
     domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
+    verify: bool = True       # cross-check final pass with a second model
+    verify_model: str | None = None  # None = pick the other large Whisper model
     version: int = 2
     groq_api_key: str = ""
 
@@ -242,4 +246,14 @@ def load_config() -> Settings:
     hint = os.getenv("DOMAIN_HINT", "").strip()
     if hint:
         kwargs["domain_hint"] = hint
+    # VERIFY
+    verify_env = os.getenv("VERIFY", "").strip().lower()
+    if verify_env in ("0", "false", "no", "off"):
+        kwargs["verify"] = False
+    elif verify_env in ("1", "true", "yes", "on"):
+        kwargs["verify"] = True
+    # VERIFY_MODEL
+    verify_model = os.getenv("VERIFY_MODEL", "").strip()
+    if verify_model:
+        kwargs["verify_model"] = None if verify_model.lower() == "none" else verify_model
     return Settings(**kwargs)

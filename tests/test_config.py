@@ -25,6 +25,36 @@ def test_domain_hint_defaults_empty():
     assert cfg.domain_hint == ""
 
 
+def test_verify_defaults_on():
+    cfg = Config()
+    assert cfg.verify is True
+    assert cfg.verify_model is None
+
+
+def test_load_config_reads_verify_env():
+    import os
+    os.environ["VERIFY"] = "0"
+    os.environ["VERIFY_MODEL"] = "whisper-large-v3"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("VERIFY", None)
+        os.environ.pop("VERIFY_MODEL", None)
+    assert cfg.verify is False
+    assert cfg.verify_model == "whisper-large-v3"
+
+
+def test_load_config_verify_model_none():
+    import os
+    os.environ["VERIFY_MODEL"] = "none"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("VERIFY_MODEL", None)
+    assert cfg.verify is True
+    assert cfg.verify_model is None
+
+
 def test_load_config_uses_env():
     import os
     os.environ["GROQ_API_KEY"] = "sk-env"

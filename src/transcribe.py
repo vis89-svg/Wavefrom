@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from groq import Groq
@@ -16,6 +16,23 @@ class RateLimitInfo:
     remaining_requests: int | None
     remaining_tokens: int | None
     retry_after: float | None
+
+
+@dataclass
+class Segment:
+    """One verbose-json segment with confidence metadata."""
+    text: str
+    start: float
+    end: float
+    avg_logprob: float | None = None
+    no_speech_prob: float | None = None
+
+
+@dataclass
+class TranscriptResult:
+    """Text plus optional per-segment confidence metadata."""
+    text: str
+    segments: list[Segment] = field(default_factory=list)
 
 
 class RateLimitError(RuntimeError):
@@ -48,20 +65,44 @@ class TranscriptionClient:
         return response.text if hasattr(response, "text") else str(response)
 
     def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav",
-                         language: str | None = None, prompt: str | None = None) -> str:
-        """Transcribe raw audio bytes (e.g. a chunk from the microphone)."""
+                         language: str | None = None, prompt: str | None = None,
+                         model: str | None = None,
+                         temperature: float | None = None,
+                         verbose: bool = False) -> str | TranscriptResult:
+        """Transcribe raw audio bytes (e.g. a chunk from the microphone).
+
+        Returns the raw transcript text, or a TranscriptResult with per-segment
+        confidence metadata when `verbose` is set. `model` overrides the client
+        default (used by the verify pass); `temperature` defaults to 0.
+        """
         kwargs: dict = {
-            "model": self._model,
+            "model": model or self._model,
             "file": (filename, audio_bytes),
-            "response_format": "text",
+            "response_format": "verbose_json" if verbose else "text",
         }
         if language:
             kwargs["language"] = language
         if prompt:
             kwargs["prompt"] = prompt
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         response = self._client.audio.transcriptions.create(**kwargs)
         self.last_rate_limit = self._read_headers()
-        return response.text if hasattr(response, "text") else str(response)
+
+        if not verbose:
+            return response.text if hasattr(response, "text") else str(response)
+
+        segments: list[Segment] = []
+        for seg in getattr(response, "segments", []) or []:
+            segments.append(Segment(
+                text=getattr(seg, "text", ""),
+                start=float(getattr(seg, "start", 0.0)),
+                end=float(getattr(seg, "end", 0.0)),
+                avg_logprob=getattr(seg, "avg_logprob", None),
+                no_speech_prob=getattr(seg, "no_speech_prob", None),
+            ))
+        text = response.text if hasattr(response, "text") else str(response)
+        return TranscriptResult(text=text, segments=segments)
 
     def _read_headers(self) -> RateLimitInfo:
         try:
