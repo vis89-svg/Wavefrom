@@ -380,6 +380,43 @@ def test_no_hint_and_empty_committed_omits_prompt():
     assert transcriber.kwargs[0]["prompt"] is None
 
 
+def test_glossary_biases_slice_and_full_audio_prompts():
+    transcriber = FakeTranscriber([
+        "hello world",                       # slice
+        "hello world this is streaming",     # full-audio chunk
+    ])
+    engine = make_engine(transcriber, None)
+    engine._config.domain_hint = "software development"
+    engine._config.glossary = ["Razorpay", "Lorem Ipsum"]
+
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    for prompt in transcriber.kwargs[0]["prompt"], transcriber.kwargs[1]["prompt"]:
+        assert "Razorpay" in prompt
+        assert "Lorem Ipsum" in prompt
+    # hint comes first, glossary after, then committed words
+    assert transcriber.kwargs[0]["prompt"].split(" Razorpay ")[0] == "software development"
+
+
+def test_prompt_capped_when_glossary_long(monkeypatch):
+    from src.streaming import MAX_PROMPT_CHARS
+
+    transcriber = FakeTranscriber(["hello world"])
+    engine = make_engine(transcriber, None)
+    engine._config.glossary = [f"term{i}" for i in range(100)]
+    engine._committed = ["word"] * 50
+
+    prompt = engine._context_prompt()
+    assert prompt is not None
+    assert len(prompt) <= MAX_PROMPT_CHARS
+    # the committed-words tail is dropped before the glossary bias is
+    assert "word" not in prompt
+
+
 class FakeCleaner:
     def __init__(self, choices=None):
         self.choices = choices or {}

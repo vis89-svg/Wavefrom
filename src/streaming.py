@@ -28,6 +28,7 @@ OVERLAP_SECS = 0.4
 SILENCE_PERIOD_SECS = 1.2
 MAX_SILENCE_SECS = 3.0
 MAX_RECORD_SECS = 120.0
+MAX_PROMPT_CHARS = 120
 FINAL_CHUNK_SECS = 30.0
 FINAL_CHUNK_OVERLAP_SECS = 2.0
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
@@ -277,19 +278,43 @@ class DictationEngine:
 
     # ------------------------------------------------- full-audio transcription
     def _context_prompt(self, tail: int = 15) -> str | None:
-        """Whisper context prompt = optional domain hint + last committed words.
+        """Whisper context prompt = domain hint + glossary + last committed words.
 
         Whisper uses this to bias recognition toward the right words (e.g.
-        "login system" instead of "logging system"). Kept short — a long prompt
-        can be echoed back verbatim.
+        "login system" instead of "logging system", or a custom name like
+        "Razorpay" instead of a mis-hearing). Kept short — a long prompt can be
+        echoed back verbatim, so the user-specific bias (hint + glossary) wins
+        over the committed-words tail when the prompt gets too long.
         """
         parts: list[str] = []
         hint = getattr(self._config, "domain_hint", "") or ""
         if hint.strip():
             parts.append(hint.strip())
+        seen: set[str] = set()
+        terms: list[str] = []
+        for t in (getattr(self._config, "glossary", None) or []):
+            term = str(t).strip()
+            if term and term.lower() not in seen:
+                seen.add(term.lower())
+                terms.append(term)
+        if terms:
+            parts.append(" ".join(terms))
         if self._committed:
             parts.append(" ".join(self._committed[-tail:]))
-        return " ".join(parts) if parts else None
+        prompt = " ".join(parts)
+        if len(prompt) > MAX_PROMPT_CHARS:
+            # keep the hint + glossary bias, drop the committed-words tail;
+            # if the glossary alone is still too long, trim whole terms.
+            head = " ".join(parts[:-1]) if len(parts) > 1 else parts[0]
+            if len(head) > MAX_PROMPT_CHARS:
+                cut = head[:MAX_PROMPT_CHARS]
+                idx = cut.rfind(",")
+                if idx > 0:
+                    cut = cut[:idx]
+                prompt = cut.strip()
+            else:
+                prompt = head
+        return prompt or None
 
     def _transcribe_full_audio(self, wav_bytes: bytes, model: str | None = None,
                                temperature: float | None = None

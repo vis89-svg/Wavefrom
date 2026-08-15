@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+from dataclasses import asdict
 from tkinter import messagebox, ttk
 
 from src.version import APP_NAME
@@ -29,6 +30,7 @@ def show_settings_dialog(settings, on_save=None) -> bool:
     hotkey_var = tk.StringVar(value=settings.hotkey)
     mode_var = tk.StringVar(value=settings.mode)
     lang_var = tk.StringVar(value=settings.language or "")
+    glossary_var = tk.StringVar(value=", ".join(settings.glossary))
     cleanup_var = tk.BooleanVar(value=bool(settings.cleanup_model))
     autostart_var = tk.BooleanVar(value=settings.autostart)
     key_var = tk.StringVar(value=get_api_key())
@@ -52,6 +54,13 @@ def show_settings_dialog(settings, on_save=None) -> bool:
 
     field(row, "Language (blank = auto-detect)",
           ttk.Entry(frm, textvariable=lang_var, width=30))
+    row += 1
+
+    field(row, "Custom words (comma-separated)",
+          ttk.Entry(frm, textvariable=glossary_var, width=30))
+    ttk.Label(frm,
+              text="Names/terms to keep verbatim (e.g. Razorpay, Lorem Ipsum)").grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
     row += 1
 
     cleanup_chk = ttk.Checkbutton(frm, variable=cleanup_var)
@@ -86,19 +95,15 @@ def show_settings_dialog(settings, on_save=None) -> bool:
             except Exception as e:
                 messagebox.showerror("Settings", f"Could not save API key: {e}")
                 return
-        updated = type(settings)(
-            hotkey=hotkey,
-            mode=mode_var.get(),
-            language=lang_var.get().strip() or None,
-            cleanup_model="llama-3.3-70b-versatile" if cleanup_var.get() else None,
-            autostart=autostart_var.get(),
-            toasts=settings.toasts,
-            tray=settings.tray,
-            whisper_model=settings.whisper_model,
-            sample_rate=settings.sample_rate,
-            local_engine=settings.local_engine,
-            local_model=settings.local_model,
-        )
+        updated = type(settings)(**{
+            **asdict(settings),
+            "hotkey": hotkey,
+            "mode": mode_var.get(),
+            "language": lang_var.get().strip() or None,
+            "cleanup_model": "llama-3.3-70b-versatile" if cleanup_var.get() else None,
+            "autostart": autostart_var.get(),
+            "glossary": [t.strip() for t in glossary_var.get().split(",") if t.strip()],
+        })
         save_settings(updated)
         if on_save:
             try:

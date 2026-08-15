@@ -78,19 +78,43 @@ RECONCILE_PROMPT = (
 
 BATCH_LIMIT = 4
 
+_GLOSSARY_RULE = (
+    "User-specific names and terms that MUST be spelled exactly as written "
+    "below. If the transcript contains a close-but-wrong spelling of one of "
+    "these (e.g. a similar-sounding word or a mis-capitalization), fix it to "
+    "the exact form listed. Never change these terms otherwise: "
+)
+
+
+def _glossary_line(glossary: list[str]) -> str:
+    terms = [str(t).strip() for t in glossary if str(t).strip()]
+    if not terms:
+        return ""
+    return _GLOSSARY_RULE + ", ".join(terms) + ".\n"
+
 
 class CleanupClient:
     def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile",
-                 mode: str = "correcting"):
+                 mode: str = "correcting", glossary: list[str] | None = None):
         self._client = Groq(api_key=api_key)
         self._model = model
         self.mode = mode if mode in ("correcting", "conservative") else "correcting"
+        seen: set[str] = set()
+        terms: list[str] = []
+        for t in (glossary or []):
+            term = str(t).strip()
+            if term and term.lower() not in seen:
+                seen.add(term.lower())
+                terms.append(term)
+        self.glossary = terms
 
     @property
     def system_prompt(self) -> str:
         if self.mode == "conservative":
-            return CONSERVATIVE_PROMPT
-        return CORRECTING_PROMPT
+            base = CONSERVATIVE_PROMPT
+        else:
+            base = CORRECTING_PROMPT
+        return base + _glossary_line(self.glossary)
 
     def clean(self, transcript: str) -> str:
         if not transcript.strip():
@@ -130,7 +154,8 @@ class CleanupClient:
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=[
-                    {"role": "system", "content": RECONCILE_PROMPT},
+                    {"role": "system",
+                     "content": RECONCILE_PROMPT + _glossary_line(self.glossary)},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,

@@ -34,6 +34,34 @@ def test_correcting_prompt_fixes_common_confusions():
     assert "four web applications" in CORRECTING_PROMPT
 
 
+def test_glossary_added_to_correcting_prompt():
+    client = CleanupClient(api_key="test-key", glossary=["Razorpay", "Lorem Ipsum"])
+    prompt = client.system_prompt
+    assert prompt.startswith(CORRECTING_PROMPT)
+    assert "MUST be spelled exactly" in prompt
+    assert "Razorpay, Lorem Ipsum" in prompt
+
+
+def test_glossary_added_to_conservative_prompt():
+    client = CleanupClient(api_key="test-key", mode="conservative",
+                           glossary=["Razorpay"])
+    prompt = client.system_prompt
+    assert prompt.startswith(CONSERVATIVE_PROMPT)
+    assert "MUST be spelled exactly" in prompt
+    assert "Razorpay" in prompt
+
+
+def test_glossary_strips_and_deduplicates():
+    client = CleanupClient(api_key="test-key", glossary=[" Razorpay ", "", "Razorpay"])
+    assert client.glossary == ["Razorpay"]
+    assert client.system_prompt.count("Razorpay") == 1
+
+
+def test_no_glossary_leaves_prompt_unchanged():
+    client = CleanupClient(api_key="test-key", glossary=[])
+    assert client.system_prompt == CORRECTING_PROMPT
+
+
 def test_system_prompt_alias_is_correcting():
     assert SYSTEM_PROMPT == CORRECTING_PROMPT
 
@@ -116,3 +144,20 @@ def test_reconcile_prompt_includes_confidence_note(monkeypatch):
     client.reconcile([_dispute(0, "x", "y", plow=True, vlow=True)])
     assert "low audio confidence" in sent["user"]
     assert "0: A: 'x' | B: 'y'" in sent["user"]
+
+
+def test_reconcile_prompt_includes_glossary(monkeypatch):
+    client = CleanupClient(api_key="test-key", glossary=["Razorpay"])
+    sent = {}
+
+    class FakeResponse:
+        choices = [type("C", (), {"message": type("M", (), {"content": ""})})()]
+
+    def capture(**kw):
+        sent["system"] = kw["messages"][0]["content"]
+        return FakeResponse()
+
+    monkeypatch.setattr(client._client.chat.completions, "create", capture)
+    client.reconcile([_dispute(0, "resopay", "razorpay")])
+    assert "MUST be spelled exactly" in sent["system"]
+    assert "Razorpay" in sent["system"]

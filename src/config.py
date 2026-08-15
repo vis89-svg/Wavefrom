@@ -48,7 +48,7 @@ class Settings:
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
     cleanup_mode: str = "correcting"  # correcting | conservative
-    language: str | None = None
+    language: str | None = "en"  # forced decode language (None = auto-detect)
     sample_rate: int = DEFAULT_SAMPLE_RATE
     toasts: bool = True
     tray: bool = True
@@ -57,6 +57,7 @@ class Settings:
     local_model: str = "small"
     vad_filter: bool = False  # local engine only; off = keep all spoken content
     domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
+    glossary: list[str] = field(default_factory=list)  # names/terms to keep verbatim
     verify: bool = True       # cross-check final pass with a second model
     verify_model: str | None = None  # None = pick the other large Whisper model
     version: int = 2
@@ -76,7 +77,7 @@ class Settings:
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
     cleanup_mode: str = "correcting"  # correcting | conservative
-    language: str | None = None
+    language: str | None = "en"  # forced decode language (None = auto-detect)
     sample_rate: int = DEFAULT_SAMPLE_RATE
     toasts: bool = True
     tray: bool = True
@@ -85,6 +86,7 @@ class Settings:
     local_model: str = "small"
     vad_filter: bool = False  # local engine only; off = keep all spoken content
     domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
+    glossary: list[str] = field(default_factory=list)  # names/terms to keep verbatim
     verify: bool = True       # cross-check final pass with a second model
     verify_model: str | None = None  # None = pick the other large Whisper model
     version: int = 2
@@ -242,10 +244,18 @@ def load_config() -> Settings:
     cleanup_mode = os.getenv("CLEANUP_MODE", "").strip().lower()
     if cleanup_mode in ("correcting", "conservative"):
         kwargs["cleanup_mode"] = cleanup_mode
+    # LANGUAGE (forced decode language; "none"/empty = auto-detect)
+    language_env = os.getenv("LANGUAGE", "").strip()
+    if language_env:
+        kwargs["language"] = None if language_env.lower() in ("none", "auto") else language_env
     # DOMAIN_HINT
     hint = os.getenv("DOMAIN_HINT", "").strip()
     if hint:
         kwargs["domain_hint"] = hint
+    # GLOSSARY (comma-separated names/terms to keep verbatim)
+    glossary_env = os.getenv("GLOSSARY", "").strip()
+    if glossary_env:
+        kwargs["glossary"] = [t.strip() for t in glossary_env.split(",") if t.strip()]
     # VERIFY
     verify_env = os.getenv("VERIFY", "").strip().lower()
     if verify_env in ("0", "false", "no", "off"):

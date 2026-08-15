@@ -107,7 +107,8 @@ def _build_engine(settings: Settings, api_key: str) -> DictationEngine:
     cleaner = None
     if settings.cleanup_model and not settings.local_engine:
         cleaner = CleanupClient(api_key, model=settings.cleanup_model,
-                                mode=settings.cleanup_mode)
+                                mode=settings.cleanup_mode,
+                                glossary=settings.glossary)
     return DictationEngine(settings, transcriber, cleaner=cleaner,
                            injector=None, notify=None, tray=None)
 

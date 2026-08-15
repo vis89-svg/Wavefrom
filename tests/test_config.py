@@ -25,6 +25,46 @@ def test_domain_hint_defaults_empty():
     assert cfg.domain_hint == ""
 
 
+def test_glossary_defaults_empty():
+    cfg = Config()
+    assert cfg.glossary == []
+
+
+def test_language_defaults_english():
+    cfg = Config()
+    assert cfg.language == "en"
+
+
+def test_load_config_reads_language_env():
+    import os
+    os.environ["LANGUAGE"] = "hi"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("LANGUAGE", None)
+    assert cfg.language == "hi"
+
+
+def test_load_config_language_none_overrides():
+    import os
+    os.environ["LANGUAGE"] = "none"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("LANGUAGE", None)
+    assert cfg.language is None
+
+
+def test_load_config_reads_glossary_env():
+    import os
+    os.environ["GLOSSARY"] = "Razorpay, Lorem Ipsum,  stripe"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("GLOSSARY", None)
+    assert cfg.glossary == ["Razorpay", "Lorem Ipsum", "stripe"]
+
+
 def test_verify_defaults_on():
     cfg = Config()
     assert cfg.verify is True
