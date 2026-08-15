@@ -28,3 +28,8 @@ def test_correcting_prompt_has_guardrails():
 
 def test_system_prompt_alias_is_correcting():
     assert SYSTEM_PROMPT == CORRECTING_PROMPT
+
+
+def test_prompts_guard_against_omission():
+    assert "Never omit" in CONSERVATIVE_PROMPT
+    assert "Never omit" in CORRECTING_PROMPT

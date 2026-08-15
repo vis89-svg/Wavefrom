@@ -115,7 +115,8 @@ def _cmd_dictate(args: argparse.Namespace) -> int:
 def _build_pipeline(settings: Settings, api_key: str, inject: bool):
     if settings.local_engine:
         log.info("Using LOCAL Whisper engine (%s) — offline mode", settings.local_model)
-        transcriber = LocalWhisperEngine(settings.local_model)
+        transcriber = LocalWhisperEngine(settings.local_model,
+                                         vad_filter=settings.vad_filter)
     else:
         transcriber = TranscriptionClient(api_key, model=settings.whisper_model)
 

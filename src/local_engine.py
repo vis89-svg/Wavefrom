@@ -20,7 +20,7 @@ except ImportError:
 class LocalWhisperEngine:
     """Transcribes WAV bytes locally. Slower than Groq but unlimited quota."""
 
-    def __init__(self, model: str = "small"):
+    def __init__(self, model: str = "small", vad_filter: bool = False):
         if not _HAS_FASTER:
             raise RuntimeError(
                 "faster-whisper is not installed. Run: "
@@ -29,6 +29,8 @@ class LocalWhisperEngine:
         log.info("Loading local Whisper model %r (first load downloads it)...", model)
         self._model = _WhisperModel(model, device="cpu", compute_type="int8")
         self._model_name = model
+        # VAD can trim speech between silences; default off so no content is dropped.
+        self._vad_filter = vad_filter
 
     def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav",
                          language: str | None = None) -> str:
@@ -44,6 +46,6 @@ class LocalWhisperEngine:
             pcm.astype("float32") / 32768.0,
             beam_size=5,
             language=language,
-            vad_filter=True,
+            vad_filter=self._vad_filter,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()

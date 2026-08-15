@@ -15,6 +15,11 @@ def test_validate_ok():
     assert validate_config(cfg) == []
 
 
+def test_vad_filter_defaults_off():
+    cfg = Config()
+    assert cfg.vad_filter is False
+
+
 def test_load_config_uses_env():
     import os
     os.environ["GROQ_API_KEY"] = "sk-env"

@@ -55,6 +55,7 @@ class Settings:
     autostart: bool = False
     local_engine: bool = False
     local_model: str = "small"
+    vad_filter: bool = False  # local engine only; off = keep all spoken content
     version: int = 2
     groq_api_key: str = ""
 
@@ -79,6 +80,7 @@ class Settings:
     autostart: bool = False
     local_engine: bool = False
     local_model: str = "small"
+    vad_filter: bool = False  # local engine only; off = keep all spoken content
     version: int = 2
     groq_api_key: str = ""
 

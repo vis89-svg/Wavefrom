@@ -18,6 +18,8 @@ _CORE = (
     "- Remove filler words (um, uh, like, you know, so) without changing meaning.\n"
     "- Fix grammar, capitalization, and punctuation.\n"
     "- Never invent content that was not said.\n"
+    "- Never omit or drop any content. Preserve every word that was spoken; "
+    "if you are unsure, keep the original words exactly.\n"
     "- Output only the cleaned text, nothing else.\n"
 )
 
