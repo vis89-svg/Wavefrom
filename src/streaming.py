@@ -164,7 +164,7 @@ class DictationEngine:
     def _process_slice(self, wav_bytes: bytes) -> None:
         self._status.state = "transcribing"
         self._notify_tray()
-        prompt = " ".join(self._committed[-15:]) if self._committed else None
+        prompt = self._context_prompt()
         text = None
         for attempt in range(2):
             try:
@@ -256,6 +256,21 @@ class DictationEngine:
         log.info("Dictation finalized: %r", final)
 
     # ------------------------------------------------- full-audio transcription
+    def _context_prompt(self, tail: int = 15) -> str | None:
+        """Whisper context prompt = optional domain hint + last committed words.
+
+        Whisper uses this to bias recognition toward the right words (e.g.
+        "login system" instead of "logging system"). Kept short — a long prompt
+        can be echoed back verbatim.
+        """
+        parts: list[str] = []
+        hint = getattr(self._config, "domain_hint", "") or ""
+        if hint.strip():
+            parts.append(hint.strip())
+        if self._committed:
+            parts.append(" ".join(self._committed[-tail:]))
+        return " ".join(parts) if parts else None
+
     def _transcribe_full_audio(self, wav_bytes: bytes) -> str:
         """Chunked transcription of the whole recording.
 
@@ -276,7 +291,8 @@ class DictationEngine:
             window = pcm[i:i + chunk_len]
             if len(window) >= min_len:
                 text = self._transcriber.transcribe_bytes(
-                    _to_wav(window, rate), language=self._config.language)
+                    _to_wav(window, rate), language=self._config.language,
+                    prompt=self._context_prompt(tail=24))
                 committed, _ = merge_segments(committed, text, max_overlap=24)
             i += chunk_len - overlap
         return " ".join(committed)

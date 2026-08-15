@@ -13,9 +13,11 @@ class FakeTranscriber:
     def __init__(self, map_by_slice):
         self._map = map_by_slice
         self.calls = []
+        self.kwargs = []
 
     def transcribe_bytes(self, audio_bytes, **kwargs):
         self.calls.append(len(audio_bytes))
+        self.kwargs.append(kwargs)
         idx = len(self.calls) - 1
         return self._map[min(idx, len(self._map) - 1)]
 
@@ -298,3 +300,41 @@ def test_pcm_from_wav_roundtrip():
     pcm, r = pcm_from_wav(_to_wav(tone, rate))
     assert r == rate
     assert np.array_equal(pcm, tone)
+
+
+def test_domain_hint_biases_slice_and_full_audio_prompts():
+    # The optional domain hint is prepended to the Whisper context prompt for
+    # both the per-slice calls and the final full-audio chunk calls.
+    transcriber = FakeTranscriber([
+        "hello world",                       # slice
+        "hello world this is streaming",     # full-audio chunk
+    ])
+    engine = make_engine(transcriber, None)
+    engine._config.domain_hint = "software development"
+
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    # slice prompt: hint only (nothing committed yet)
+    assert transcriber.kwargs[0]["prompt"] == "software development"
+    # full-audio chunk prompt: hint + last committed words
+    chunk_prompt = transcriber.kwargs[1]["prompt"]
+    assert chunk_prompt.startswith("software development")
+    assert "hello world" in chunk_prompt
+    assert engine.status.state == "idle"
+
+
+def test_no_hint_and_empty_committed_omits_prompt():
+    transcriber = FakeTranscriber(["hello world"])
+    engine = make_engine(transcriber, None)
+
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert transcriber.kwargs[0]["prompt"] is None

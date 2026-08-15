@@ -2,8 +2,9 @@
 
 Two modes:
   - "conservative": grammar/punctuation/filler only; every word is preserved.
-  - "correcting" (default): additionally fixes clear mis-transcriptions of
-    well-known names, places, and terms when the intent is obvious from
+  - "correcting" (default): additionally fixes clear mis-transcriptions —
+    well-known names, similar-sounding word confusions, hallucinated numbers,
+    and plainly-wrong phrases — when the intended meaning is obvious from
     context, with a strict guard against inventing content.
 """
 from __future__ import annotations
@@ -34,9 +35,20 @@ CORRECTING_PROMPT = (
     "names, places, and terms when the intended word is obvious from context "
     '(e.g. "L\'Avram Ipsum" -> "Lorem Ipsum", "Caesarea transition" -> '
     '"Cicero translation"). Only correct when very confident.\n'
-    "- CRITICAL: Do NOT invent content. Never change an unusual word into a "
-    "plausible-sounding but different word. If you are unsure what was meant, "
-    "leave the original words exactly as-is.\n"
+    "- Fix similar-sounding word confusions that speech recognition commonly "
+    "makes, when the surrounding sentence makes the intended word obvious "
+    '(e.g. "basic logging system" -> "basic login system", and "business '
+    'strategy" -> "business logic" in a software context).\n'
+    "- Fix hallucinated or mistranscribed numbers and quantifiers when the "
+    "rest of the sentence makes the intended phrase obvious "
+    '(e.g. "the four web applications would be gone" -> "the whole application '
+    "is basically gone\" when that is clearly what was meant).\n"
+    "- When a phrase is plainly wrong but the sentence's meaning is clear, "
+    "restore the natural wording that was actually spoken (e.g. \"appear on "
+    'the back end" -> "appear in the list").\n'
+    "- CRITICAL: Do NOT invent content. Only correct when you are confident of "
+    "the intended meaning. If you are unsure, leave the original words "
+    "exactly as-is.\n"
 )
 
 # Backwards-compatible default prompt for callers that don't pick a mode.

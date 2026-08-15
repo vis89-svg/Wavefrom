@@ -33,7 +33,8 @@ class LocalWhisperEngine:
         self._vad_filter = vad_filter
 
     def transcribe_bytes(self, audio_bytes: bytes, filename: str = "audio.wav",
-                         language: str | None = None) -> str:
+                         language: str | None = None,
+                         prompt: str | None = None) -> str:
         import io
         import wave
 
@@ -47,5 +48,6 @@ class LocalWhisperEngine:
             beam_size=5,
             language=language,
             vad_filter=self._vad_filter,
+            initial_prompt=prompt,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()

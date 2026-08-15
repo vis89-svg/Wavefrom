@@ -56,6 +56,7 @@ class Settings:
     local_engine: bool = False
     local_model: str = "small"
     vad_filter: bool = False  # local engine only; off = keep all spoken content
+    domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
     version: int = 2
     groq_api_key: str = ""
 
@@ -81,6 +82,7 @@ class Settings:
     local_engine: bool = False
     local_model: str = "small"
     vad_filter: bool = False  # local engine only; off = keep all spoken content
+    domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
     version: int = 2
     groq_api_key: str = ""
 
@@ -136,7 +138,20 @@ def get_api_key() -> str:
         return os.getenv("GROQ_API_KEY", "").strip()
 
     load_dotenv(ENV_PATH)
-    return os.getenv("GROQ_API_KEY", "").strip()
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    if key:
+        return key
+    # A UTF-8 BOM on the first line of .env breaks python-dotenv's parse of
+    # GROQ_API_KEY; read it directly as a fallback.
+    if ENV_PATH.is_file():
+        try:
+            for line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+                k, _, v = line.partition("=")
+                if k.strip() == "GROQ_API_KEY" and v.strip():
+                    return v.strip()
+        except Exception:
+            pass
+    return ""
 
 
 def set_api_key(key: str) -> None:
@@ -223,4 +238,8 @@ def load_config() -> Settings:
     cleanup_mode = os.getenv("CLEANUP_MODE", "").strip().lower()
     if cleanup_mode in ("correcting", "conservative"):
         kwargs["cleanup_mode"] = cleanup_mode
+    # DOMAIN_HINT
+    hint = os.getenv("DOMAIN_HINT", "").strip()
+    if hint:
+        kwargs["domain_hint"] = hint
     return Settings(**kwargs)

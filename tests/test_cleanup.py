@@ -26,6 +26,13 @@ def test_correcting_prompt_has_guardrails():
     assert "obvious from context" in client.system_prompt
 
 
+def test_correcting_prompt_fixes_common_confusions():
+    assert "similar-sounding word confusions" in CORRECTING_PROMPT
+    assert "login system" in CORRECTING_PROMPT
+    assert "hallucinated or mistranscribed numbers" in CORRECTING_PROMPT
+    assert "four web applications" in CORRECTING_PROMPT
+
+
 def test_system_prompt_alias_is_correcting():
     assert SYSTEM_PROMPT == CORRECTING_PROMPT
 
