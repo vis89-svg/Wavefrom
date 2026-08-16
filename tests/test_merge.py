@@ -1,7 +1,8 @@
 """Unit tests for overlap-diff merging."""
-from src.merge import (apply_disputes, common_prefix_len, diff_plan,
-                       ensure_period, find_disputed_blocks, merge_segments,
-                       union_text)
+from src.merge import (apply_disputes, collapse_adjacent_repeats,
+                       common_prefix_len, diff_plan, ensure_period,
+                       find_disputed_blocks, merge_segments,
+                       strip_trailing_repeat, union_text)
 
 
 def test_merge_appends_new_tail():
@@ -200,3 +201,54 @@ def test_apply_disputes_splices_verify_choice():
 
 def test_apply_disputes_no_disputes_is_identity():
     assert apply_disputes("hello world", [], {}) == "hello world"
+
+
+# ----------------------------------------------------------- echo / repeat de-dup
+
+
+def test_strip_trailing_repeat_removes_non_adjacent_echo():
+    # "we go to the store" repeated at the end (echo) is dropped; the real
+    # earlier content stays.
+    assert strip_trailing_repeat(
+        "we go to the store every day we go to the store"
+    ) == "we go to the store every day"
+
+
+def test_strip_trailing_repeat_punctuation_insensitive():
+    # "over the years," vs "over the years." still counts as a repeat.
+    assert strip_trailing_repeat("over the years, over the years.") == "over the years,"
+
+
+def test_strip_trailing_repeat_preserves_short_text():
+    # Below MIN_REPEAT_WORDS a trailing repetition is a real stutter.
+    assert strip_trailing_repeat("no no no") == "no no no"
+    assert strip_trailing_repeat("hello world") == "hello world"
+    assert strip_trailing_repeat("") == ""
+
+
+def test_collapse_adjacent_repeats_collapses_echo():
+    assert collapse_adjacent_repeats("go to the store go to the store") == "go to the store"
+    assert collapse_adjacent_repeats(
+        "thank you so much thank you so much thank you so much"
+    ) == "thank you so much"
+    assert collapse_adjacent_repeats(
+        "alpha beta gamma delta alpha beta gamma delta"
+    ) == "alpha beta gamma delta"
+
+
+def test_collapse_adjacent_repeats_punctuation_insensitive():
+    assert collapse_adjacent_repeats(
+        "The plan worked. The plan worked. The plan worked."
+    ) == "The plan worked."
+
+
+def test_collapse_adjacent_repeats_preserves_stutters():
+    # 1-2 word repeats are normal speech, never collapsed.
+    assert collapse_adjacent_repeats("no no no") == "no no no"
+    assert collapse_adjacent_repeats("the end the end") == "the end the end"
+    assert collapse_adjacent_repeats("right right right now") == "right right right now"
+
+
+def test_collapse_adjacent_repeats_unchanged_unique_text():
+    text = "the quick brown fox jumps over the lazy dog"
+    assert collapse_adjacent_repeats(text) == text

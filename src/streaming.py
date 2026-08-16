@@ -18,8 +18,10 @@ from dataclasses import dataclass
 import numpy as np
 import sounddevice as sd
 
-from src.merge import (PUNCT, _norm, apply_disputes, diff_plan, ensure_period,
-                       find_disputed_blocks, merge_segments, union_text)
+from src.merge import (PUNCT, _is_subsequence, _norm, apply_disputes,
+                       collapse_adjacent_repeats, diff_plan, ensure_period,
+                       find_disputed_blocks, merge_segments,
+                       strip_trailing_repeat, tokenize, union_text)
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +87,12 @@ class DictationEngine:
         self._stop_capture.clear()
         self._active.set()
         self._pending_period = False
+        # Fresh per-dictation state: without this, words from a previous
+        # session stay in _committed and leak into the next prompt/merge.
+        self._committed = []
+        self._typed_text = ""
+        self._full_audio = None
+        self._last_disputes = []
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
@@ -208,17 +216,39 @@ class DictationEngine:
             # optional watermark is handled at display layer in M2+; skip here
             pass
 
+        # Whisper loops a phrase on silence/echo; collapse adjacent repeats
+        # before any merge so the loop never becomes committed text.
+        text = collapse_adjacent_repeats(text)
+
         with self._lock:
-            # 0.4s of audio overlap is only a few words; cap the overlap search
-            # so a coincidental longer match can never swallow real content.
-            committed, appended = merge_segments(self._committed, text,
-                                                 max_overlap=8)
-            self._committed = committed
-            if self._pending_period:
-                self._committed = ensure_period(self._committed)
-                self._pending_period = False
-                appended = (appended + " " if appended else "") + "."
-            self._typed_text = " ".join(self._committed)
+            # A transcript that is only words we already sent as the Whisper
+            # prompt is the model echoing the prompt back, not new speech.
+            if text.strip() and _is_subsequence(tokenize(text),
+                                                tokenize(prompt or "")):
+                log.debug("Slice is a prompt echo; ignoring: %r", text)
+            else:
+                old_committed = self._committed
+                # 0.4s of audio overlap is only a few words; cap the overlap
+                # search so a coincidental longer match can never swallow real
+                # content.
+                committed, appended = merge_segments(self._committed, text,
+                                                     max_overlap=8)
+                # The tail to be typed may itself be only prompt words echoed
+                # back after the overlap match ("real words" + prompt echo).
+                # Anything past the overlap was already covered by committed,
+                # so dropping an all-echo tail loses no new speech.
+                if appended.strip() and _is_subsequence(
+                        tokenize(appended), tokenize(prompt or "")):
+                    log.debug("Slice tail is a prompt echo; dropping: %r",
+                              appended)
+                    committed = old_committed
+                    appended = ""
+                self._committed = committed
+                if self._pending_period:
+                    self._committed = ensure_period(self._committed)
+                    self._pending_period = False
+                    appended = (appended + " " if appended else "") + "."
+                self._typed_text = " ".join(self._committed)
         if self._injector and appended:
             sep = "" if (not self._typed_text or self._typed_text.endswith(" ")
                          or appended.startswith(" ")) else " "
@@ -248,6 +278,10 @@ class DictationEngine:
                     final = union_text(full_text.strip(), raw)
             except Exception as e:
                 log.warning("Full-audio transcription failed, using merged slices: %s", e)
+
+        # Final safety net: collapse adjacent loops and drop trailing echoes
+        # anywhere in the assembled text before cleanup/typing.
+        final = strip_trailing_repeat(collapse_adjacent_repeats(final))
 
         if not final.strip():
             self._status.state = "idle"
@@ -360,6 +394,10 @@ class DictationEngine:
                 else:  # TranscriptResult with confidence metadata
                     text = result.text
                     low_conf.update(_low_conf_words(result))
+                # A chunk may itself loop or echo back prompt words; strip both
+                # before stitching, so they can't leak into mid-text when the
+                # chunk is merged with the next one.
+                text = strip_trailing_repeat(collapse_adjacent_repeats(text))
                 committed, _ = merge_segments(committed, text, max_overlap=24)
             i += chunk_len - overlap
         return " ".join(committed), low_conf

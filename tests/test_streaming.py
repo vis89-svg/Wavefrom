@@ -90,8 +90,8 @@ def test_worker_slices_merge_and_type():
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
 
-    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
     engine.start()
+    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
@@ -135,8 +135,8 @@ def test_finalize_cleanup_replaces_text():
             return "hello world, everyone here."
 
     engine._cleaner = FakeCleaner()
-    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
     engine.start()
+    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -503,3 +503,141 @@ def test_verify_reconcile_failure_keeps_primary():
 
     assert len(engine._last_disputes) == 1
     assert "four web apps" in engine.status.committed_text
+
+
+# ------------------------------------------------------- echo / past-content leak
+
+
+def test_start_resets_state_between_dictations():
+    # start() must clear all per-dictation state so nothing from a previous
+    # session leaks into the next prompt/merge.
+    engine = make_engine(FakeTranscriber(["x"]), None)
+    engine._committed = ["stale", "words"]
+    engine._typed_text = "stale words"
+    engine._full_audio = b"old"
+    engine._last_disputes = ["old"]
+    engine.start()
+    assert engine._committed == []
+    assert engine._typed_text == ""
+    assert engine._full_audio is None
+    assert engine._last_disputes == []
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+
+def test_two_dictations_do_not_contaminate_each_other():
+    # Dictation 2 must never contain words from dictation 1.
+    engine = make_engine(FakeTranscriber(["first session words here"]), None)
+    engine.start()
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+    assert " ".join(engine._committed) == "first session words here"
+
+    engine._transcriber = FakeTranscriber(["second session"])
+    engine.start()
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+    assert " ".join(engine._committed) == "second session"
+    assert engine.status.committed_text == "second session."
+    assert "first" not in engine.status.committed_text
+    assert "session" not in engine.status.committed_text.replace("second session", "")
+
+
+def test_prompt_echo_slice_is_not_retyped():
+    # A transcript that is only the words we sent as the Whisper prompt is the
+    # model echoing the prompt back — nothing new, nothing typed.
+    words = ("the quick brown fox jumps over the lazy dog and runs away "
+             "into the forest").split()
+    engine = make_engine(FakeTranscriber([" ".join(words)]), None)
+    engine._committed = list(words)
+    engine._typed_text = " ".join(words)
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert engine._committed == list(words)
+    assert engine._typed_text == " ".join(words)
+
+
+def test_slice_tail_that_is_prompt_echo_is_not_typed():
+    # "brown fox jumps over" re-covers already-typed words (overlap); the tail
+    # "the quick brown fox" is a prompt echo and must not be typed/committed.
+    engine = make_engine(FakeTranscriber(
+        ["brown fox jumps over the quick brown fox"]), None)
+    engine._committed = ["the", "quick", "brown", "fox", "jumps", "over"]
+    engine._typed_text = "the quick brown fox jumps over"
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert engine._committed == ["the", "quick", "brown", "fox", "jumps", "over"]
+    assert engine._typed_text == "the quick brown fox jumps over"
+
+
+def test_slice_with_adjacent_loop_is_collapsed():
+    # Whisper looping "we are done" back to back must type only one copy.
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["we are done we are done"]), injector)
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert " ".join(engine._committed) == "we are done"
+    assert injector.typed.strip() == "we are done"
+
+
+def test_slice_short_stutter_is_preserved():
+    # Real 1-2 word stutters are speech, never collapsed or dropped.
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["no no no and then we left"]), injector)
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert " ".join(engine._committed) == "no no no and then we left"
+    assert injector.typed.strip() == "no no no and then we left"
+
+
+def test_full_audio_chunk_trailing_echo_is_stripped():
+    # A full-audio chunk that ends by echoing its own head must be deduped
+    # before it becomes mid-text when chunk windows are stitched.
+    transcriber = FakeTranscriber([
+        "we go to the store every day we go to the store",
+    ])
+    engine = make_engine(transcriber, None)
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert engine.status.committed_text == "we go to the store every day."
+    assert "we go to the store every day we go to the store" not in (
+        engine.status.committed_text)
+
+
+def test_final_strips_trailing_echo_from_slice_text():
+    # A slice-level transcript with a trailing echo survives the slice pass
+    # (it is not a subsequence of the empty prompt); the final assembly must
+    # strip the echo before typing.
+    transcriber = FakeTranscriber([
+        "we go to the store every day we go to the store",
+    ])
+    engine = make_engine(transcriber, None)
+    engine.start()
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert engine.status.committed_text == "we go to the store every day."
+
+
+def test_final_collapses_adjacent_loop():
+    transcriber = FakeTranscriber([
+        "the end is near the end is near",
+    ])
+    engine = make_engine(transcriber, None)
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert engine.status.committed_text == "the end is near."

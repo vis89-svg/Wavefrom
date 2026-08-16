@@ -97,6 +97,70 @@ def _is_subsequence(needle: list[str], hay: list[str]) -> bool:
     return all(n in it for n in nw)
 
 
+MIN_REPEAT_WORDS = 3
+
+
+def strip_trailing_repeat(text: str) -> str:
+    """Drop a trailing verbatim repeat of an earlier span (Whisper echo loop).
+
+    A prompt echo shows up as the same words again at the end ("... every day
+    we go to the store. we go to the store."). Punctuation/case differences
+    still match ("years, ... years."). Only trailing spans of >=
+    MIN_REPEAT_WORDS words that repeat an earlier span are removed, so real
+    short stutters like "no no no" are preserved.
+    """
+    words = tokenize(text)
+    n = len(words)
+    if n < 2 * MIN_REPEAT_WORDS:
+        return text
+    norm = [_norm(w) for w in words]
+    for k in range(n // 2, MIN_REPEAT_WORDS - 1, -1):
+        tail_n = norm[-k:]
+        # The earlier occurrence must not overlap the trailing echo, so its
+        # start is bounded by n - 2k.
+        for i in range(0, n - 2 * k + 1):
+            if norm[i:i + k] == tail_n:
+                return " ".join(words[:-k]).strip() or text
+    return text
+
+
+def collapse_adjacent_repeats(text: str) -> str:
+    """Collapse adjacent verbatim repeats of a >= MIN_REPEAT_WORDS-word block.
+
+    Whisper loops on silence/echo: "Thank you. Thank you. Thank you." comes
+    back word-for-word. The largest repeating block is kept once and the extra
+    copies dropped. Shorter repeats ("no no no", "the end the end") are normal
+    speech and are preserved.
+    """
+    words = tokenize(text)
+    n = len(words)
+    if n < 2 * MIN_REPEAT_WORDS:
+        return text
+    norm = [_norm(w) for w in words]
+    out: list[str] = []
+    i = 0
+    while i < n:
+        best_k = 0
+        best_copies = 1
+        for k in range(MIN_REPEAT_WORDS, (n - i) // 2 + 1):
+            block = norm[i:i + k]
+            copies = 1
+            j = i + k
+            while j + k <= n and norm[j:j + k] == block:
+                copies += 1
+                j += k
+            if copies >= 2 and k > best_k:
+                best_k = k
+                best_copies = copies
+        if best_k:
+            out.extend(words[i:i + best_k])
+            i += best_k * best_copies
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
 def _gap_fill(a: list[str], b: list[str]) -> list[str]:
     """Keep all of `a`; insert b-only runs of >= MIN_GAP_BLOCK words where they
     fall between matching context in the LCS alignment."""
