@@ -36,24 +36,19 @@ CONSERVATIVE_PROMPT = (
 
 CORRECTING_PROMPT = (
     _CORE
-    + "- Correct words that are clearly mis-transcriptions of real, well-known "
-    "names, places, and terms when the intended word is obvious from context "
-    '(e.g. "L\'Avram Ipsum" -> "Lorem Ipsum", "Caesarea transition" -> '
-    '"Cicero translation"). Only correct when very confident.\n'
-    "- Fix similar-sounding word confusions that speech recognition commonly "
-    "makes, when the surrounding sentence makes the intended word obvious "
-    '(e.g. "basic logging system" -> "basic login system", and "business '
-    'strategy" -> "business logic" in a software context).\n'
-    "- Fix hallucinated or mistranscribed numbers and quantifiers when the "
-    "rest of the sentence makes the intended phrase obvious "
-    '(e.g. "the four web applications would be gone" -> "the whole application '
-    "is basically gone\" when that is clearly what was meant).\n"
-    "- When a phrase is plainly wrong but the sentence's meaning is clear, "
-    "restore the natural wording that was actually spoken (e.g. \"appear on "
-    'the back end" -> "appear in the list").\n'
-    "- CRITICAL: Do NOT invent content. Only correct when you are confident of "
-    "the intended meaning. If you are unsure, leave the original words "
-    "exactly as-is.\n"
+    + "- NEVER change proper nouns, place names, personal names, organization "
+    "names, or any capitalized words unless they are clearly a common English "
+    "word that was misheard (e.g. a common noun, not a name).\n"
+    "- NEVER replace Indian place names, Indian names, or any non-English "
+    "proper nouns with English-sounding alternatives. Always preserve them "
+    "exactly as spoken (e.g. keep Thrissur, Puthoor, Kerala, etc.).\n"
+    "- NEVER hallucinate or invent words that were not spoken. If unsure, "
+    "keep the original word exactly.\n"
+    "- Fix only obvious grammar errors, missing punctuation, and filler word "
+    "removal. Do NOT rewrite or rephrase sentences.\n"
+    "- CRITICAL: When in doubt, ALWAYS keep the original word unchanged. "
+    "It is far better to leave a slightly wrong word than to replace it "
+    "with something the speaker never said.\n"
 )
 
 # Backwards-compatible default prompt for callers that don't pick a mode.
