@@ -23,15 +23,14 @@ def test_conservative_mode_picks_conservative_prompt():
 def test_correcting_prompt_has_guardrails():
     client = CleanupClient(api_key="test-key", mode="correcting")
     assert client.system_prompt == CORRECTING_PROMPT
-    assert "Do NOT invent content" in client.system_prompt
-    assert "obvious from context" in client.system_prompt
+    assert "NEVER change proper nouns" in client.system_prompt
+    assert "When in doubt" in client.system_prompt
 
 
 def test_correcting_prompt_fixes_common_confusions():
-    assert "similar-sounding word confusions" in CORRECTING_PROMPT
-    assert "login system" in CORRECTING_PROMPT
-    assert "hallucinated or mistranscribed numbers" in CORRECTING_PROMPT
-    assert "four web applications" in CORRECTING_PROMPT
+    assert "NEVER change proper nouns" in CORRECTING_PROMPT
+    assert "NEVER hallucinate or invent words" in CORRECTING_PROMPT
+    assert "When in doubt" in CORRECTING_PROMPT
 
 
 def test_glossary_added_to_correcting_prompt():

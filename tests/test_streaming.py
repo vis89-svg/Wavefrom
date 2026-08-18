@@ -322,16 +322,15 @@ def test_slice_audio_matches_capture_windows():
     rate = 16000
     pcm = np.zeros(int(rate * 7.0), dtype=np.int16)
     slices = slice_audio(pcm, rate)
-    assert len(slices) == 3
+    assert len(slices) == 2
     sizes = []
     for s in slices:
         with wave.open(io.BytesIO(s), "rb") as w:
             sizes.append(w.getnframes())
     # first window is SLICE_SECS (no backlog yet); later windows are capped at
     # SLICE_SECS + OVERLAP_SECS of retained audio.
-    assert sizes[0] == int(rate * 2.5)
-    assert sizes[1] == int(rate * 2.9)
-    assert sizes[2] == int(rate * 2.9)
+    assert sizes[0] == int(rate * 4.0)
+    assert sizes[1] == int(rate * 4.8)
 
 
 def test_pcm_from_wav_roundtrip():
@@ -451,7 +450,7 @@ def test_verify_pass_reconciles_substitution():
     assert len(transcriber.calls) == 3
     # verify chunk used the alternate model at higher temperature
     assert transcriber.kwargs[2]["model"] == "whisper-large-v3"
-    assert transcriber.kwargs[2]["temperature"] == 0.2
+    assert transcriber.kwargs[2]["temperature"] == 0.4
     assert len(engine._last_disputes) == 1
     # reconciled: verify wording chosen, hallucinated "four web apps" gone
     assert "whole app is gone" in engine.status.committed_text

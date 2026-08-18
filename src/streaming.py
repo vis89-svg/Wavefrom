@@ -25,12 +25,12 @@ from src.merge import (PUNCT, _is_subsequence, _norm, apply_disputes,
 
 log = logging.getLogger(__name__)
 
-SLICE_SECS = 2.5
-OVERLAP_SECS = 0.4
-SILENCE_PERIOD_SECS = 1.2
+SLICE_SECS = 4.0
+OVERLAP_SECS = 0.8
+SILENCE_PERIOD_SECS = 1.5
 MAX_SILENCE_SECS = 3.0
 MAX_RECORD_SECS = 120.0
-MAX_PROMPT_CHARS = 120
+MAX_PROMPT_CHARS = 400
 FINAL_CHUNK_SECS = 30.0
 FINAL_CHUNK_OVERLAP_SECS = 2.0
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
@@ -429,7 +429,7 @@ class DictationEngine:
         """
         try:
             verify_text, verify_low = self._transcribe_full_audio(
-                wav_bytes, model=self._verify_model(), temperature=0.2)
+                wav_bytes, model=self._verify_model(), temperature=0.4)
         except Exception as e:
             log.warning("Verify pass failed, using primary: %s", e)
             self._last_disputes = []
@@ -541,7 +541,7 @@ def _is_silent(data: np.ndarray, rate: int) -> bool:
         return True
     rms = np.sqrt(np.mean(np.square(data.astype(np.float32) / 32768.0)))
     db = 20.0 * np.log10(max(rms, 1e-8))
-    return db < -35.0
+    return db < -40.0
 
 
 def _to_wav(audio: np.ndarray, rate: int) -> bytes:
