@@ -220,6 +220,7 @@ class DictationEngine:
         # before any merge so the loop never becomes committed text.
         text = collapse_adjacent_repeats(text)
 
+        appended = ""
         with self._lock:
             # A transcript that is only words we already sent as the Whisper
             # prompt is the model echoing the prompt back, not new speech.
@@ -264,20 +265,24 @@ class DictationEngine:
 
         final = raw
         if wav_bytes:
-            self._status.state = "transcribing"
-            self._notify_tray()
-            try:
-                full_text, primary_low = self._transcribe_full_audio(wav_bytes)
-                if full_text and full_text.strip():
-                    if self._verify_enabled():
-                        full_text = self._verify_and_reconcile(
-                            full_text, primary_low, wav_bytes)
-                    # The chunked full-audio pass is the primary transcript;
-                    # the slice-level result is folded in as secondary so any
-                    # sentence one pass missed is recovered by the other.
-                    final = union_text(full_text.strip(), raw)
-            except Exception as e:
-                log.warning("Full-audio transcription failed, using merged slices: %s", e)
+            # Skip expensive full-audio re-transcription for short dictations
+            # (< 12s) — streaming slices already covered it well with overlap.
+            pcm, rate = pcm_from_wav(wav_bytes)
+            audio_secs = len(pcm) / rate if rate else 0
+            if audio_secs >= 12.0:
+                self._status.state = "transcribing"
+                self._notify_tray()
+                try:
+                    full_text, primary_low = self._transcribe_full_audio(wav_bytes)
+                    if full_text and full_text.strip():
+                        if self._verify_enabled():
+                            full_text = self._verify_and_reconcile(
+                                full_text, primary_low, wav_bytes)
+                        final = union_text(full_text.strip(), raw)
+                except Exception as e:
+                    log.warning("Full-audio transcription failed, using merged slices: %s", e)
+            else:
+                log.info("Short audio (%.1fs), using streaming transcript", audio_secs)
 
         # Final safety net: collapse adjacent loops and drop trailing echoes
         # anywhere in the assembled text before cleanup/typing.
@@ -490,6 +495,21 @@ class DictationEngine:
 
     def set_tray(self, tray) -> None:
         self._tray = tray
+
+    def set_cleaner_mode(self, enabled: bool) -> None:
+        """Enable or disable the LLM cleanup pass at runtime."""
+        if enabled and self._transcriber:
+            from src.cleanup import CleanupClient
+            from src.config import get_api_key, load_settings
+            settings = load_settings()
+            api_key = get_api_key()
+            if api_key and settings.cleanup_model:
+                self._cleaner = CleanupClient(
+                    api_key, model=settings.cleanup_model,
+                    mode=settings.cleanup_mode,
+                    glossary=settings.glossary)
+        else:
+            self._cleaner = None
 
 
 def slice_audio(pcm: np.ndarray, rate: int) -> list[bytes]:

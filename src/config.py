@@ -27,7 +27,7 @@ LOGS_DIR = BASE_DIR / "logs"
 ENV_PATH = BASE_DIR / ".env"
 
 DEFAULT_WHISPER_MODEL = "whisper-large-v3-turbo"
-DEFAULT_CLEANUP_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_CLEANUP_MODEL = "openai/gpt-oss-20b"
 DEFAULT_SAMPLE_RATE = 16000
 
 KEYRING_SERVICE = "VoiceFlowDictation"

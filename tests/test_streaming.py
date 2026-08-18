@@ -91,7 +91,7 @@ def test_worker_slices_merge_and_type():
     engine = make_engine(transcriber, injector)
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
@@ -115,7 +115,7 @@ def test_finalize_full_audio_merges_missed_content():
     engine = make_engine(transcriber, injector)
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -136,7 +136,7 @@ def test_finalize_cleanup_replaces_text():
 
     engine._cleaner = FakeCleaner()
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -200,7 +200,7 @@ def test_chunked_final_union_recovers_dropped_sentence():
     engine = make_engine(transcriber, None)
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
@@ -352,7 +352,7 @@ def test_domain_hint_biases_slice_and_full_audio_prompts():
     engine._config.domain_hint = "software development"
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -371,7 +371,7 @@ def test_no_hint_and_empty_committed_omits_prompt():
     engine = make_engine(transcriber, None)
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(1600, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -389,7 +389,7 @@ def test_glossary_biases_slice_and_full_audio_prompts():
     engine._config.glossary = ["Razorpay", "Lorem Ipsum"]
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -441,7 +441,7 @@ def test_verify_pass_reconciles_substitution():
     engine._cleaner = FakeCleaner(choices={0: "B"})
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -467,7 +467,7 @@ def test_verify_skipped_when_disabled():
     engine._cleaner = FakeCleaner()
 
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -495,7 +495,7 @@ def test_verify_reconcile_failure_keeps_primary():
 
     engine._cleaner = BoomCleaner()
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
@@ -603,7 +603,7 @@ def test_full_audio_chunk_trailing_echo_is_stripped():
     ])
     engine = make_engine(transcriber, None)
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
@@ -634,7 +634,7 @@ def test_final_collapses_adjacent_loop():
     ])
     engine = make_engine(transcriber, None)
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)

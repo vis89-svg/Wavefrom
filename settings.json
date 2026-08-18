@@ -2,8 +2,8 @@
   "hotkey": "ctrl+space",
   "mode": "hold",
   "whisper_model": "whisper-large-v3-turbo",
-  "cleanup_model": "llama-3.3-70b-versatile",
-  "cleanup_mode": "conservative",
+  "cleanup_model": "openai/gpt-oss-20b",
+  "cleanup_mode": "correcting",
   "language": "en",
   "sample_rate": 16000,
   "toasts": true,
@@ -28,7 +28,7 @@
     "officials",
     "regular feed"
   ],
-  "verify": true,
+  "verify": false,
   "verify_model": null,
   "version": 2,
   "groq_api_key": ""

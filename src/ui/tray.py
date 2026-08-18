@@ -26,6 +26,7 @@ class TrayIcon:
         self._on_quit = on_quit
         self._on_toggle_mode = on_toggle_mode
         self._on_remap = on_remap
+        self._on_settings = on_settings
 
     def _make_image(self) -> Image.Image:
         size = 64

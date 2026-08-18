@@ -89,7 +89,7 @@ def _glossary_line(glossary: list[str]) -> str:
 
 
 class CleanupClient:
-    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile",
+    def __init__(self, api_key: str, model: str = "openai/gpt-oss-20b",
                  mode: str = "correcting", glossary: list[str] | None = None):
         self._client = Groq(api_key=api_key)
         self._model = model
