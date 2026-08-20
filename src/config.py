@@ -88,7 +88,7 @@ def load_settings() -> Settings:
     s = Settings(**{**asdict(Settings()), **valid})
     if s.mode not in ("hold", "tap"):
         s.mode = "hold"
-    if s.cleanup_mode not in ("correcting", "conservative"):
+    if s.cleanup_mode not in ("correcting", "conservative", "polish"):
         s.cleanup_mode = "correcting"
     return s
 
@@ -220,7 +220,7 @@ def load_config() -> Settings:
         kwargs["cleanup_model"] = None if cleanup.lower() == "none" else cleanup
     # CLEANUP_MODE
     cleanup_mode = os.getenv("CLEANUP_MODE", "").strip().lower()
-    if cleanup_mode in ("correcting", "conservative"):
+    if cleanup_mode in ("correcting", "conservative", "polish"):
         kwargs["cleanup_mode"] = cleanup_mode
     # LANGUAGE (forced decode language; "none"/empty = auto-detect)
     language_env = os.getenv("LANGUAGE", "").strip()

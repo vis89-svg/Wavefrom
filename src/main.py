@@ -386,6 +386,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         notify=toast_win if settings.toasts else None,
         overlay=overlay,
     )
+    if overlay:
+        overlay.set_polish_callback(engine.polish)
     running = {"v": True}
     capture_state = {"on": False}
     tray = None

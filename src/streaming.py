@@ -539,6 +539,74 @@ class DictationEngine:
         self._notify_tray()
         log.info("Dictation finalized: %r", final)
 
+    def polish(self) -> str | None:
+        """On-demand polish of the finalized text (overlay "Polish" button).
+
+        Runs the LLM polish pass over the current final text and replaces the
+        on-screen text with the polished version using the same guarded diff as
+        _finalize: the foreground window and caret must be unchanged, and the
+        deletion is bounded by what this session actually typed. Returns the
+        polished text, or None when polish is unavailable, refused, or failed.
+        """
+        if not self._cleaner:
+            log.warning("Polish unavailable: cleanup is disabled")
+            return None
+        if self._active.is_set() or self._busy.is_set():
+            log.info("Polish refused: a dictation is in progress")
+            return None
+        final = self._status.committed_text
+        if not final or not final.strip():
+            return None
+        from src.inject import capture_typing_context
+        baseline = capture_typing_context()
+        self._status.state = "cleaning"
+        self._notify_tray()
+        try:
+            polished = self._cleaner.polish(final, app_hint=self._app_hint())
+        except Exception as e:
+            log.warning("Polish pass failed, keeping cleaned text: %s", e)
+            self._status.state = "idle"
+            self._notify_tray()
+            return None
+        if not polished or not polished.strip():
+            self._status.state = "idle"
+            self._notify_tray()
+            return final
+        if polished.strip() != final.strip() and polished[-1] not in PUNCT:
+            polished += "."
+        if self._injector:
+            to_delete, to_type = diff_plan(final, polished)
+            window_ok = caret_ok = ledger_ok = True
+            now = capture_typing_context()
+            if now["hwnd"] != baseline["hwnd"]:
+                window_ok = False
+            elif baseline["caret"] is not None and now["caret"] is not None:
+                bx, by = baseline["caret"]
+                nx, ny = now["caret"]
+                if nx < bx - 2 or nx > bx + 2 or ny < by - 2 or ny > by + 2:
+                    caret_ok = False
+            if to_delete > self._typed_chars:
+                ledger_ok = False
+            log.info("Polish correction: final=%d polished=%d prefix=%d "
+                     "to_delete=%d to_type=%d ledger=%d window=%s caret=%s",
+                     len(final), len(polished), len(final) - to_delete,
+                     to_delete, len(to_type), self._typed_chars,
+                     window_ok, caret_ok)
+            if window_ok and caret_ok and ledger_ok:
+                if to_delete:
+                    self._injector.delete_chars(to_delete)
+                if to_type:
+                    self._injector.inject_text(to_type)
+            else:
+                log.warning("Polish skipped (window=%s caret=%s ledger=%s); "
+                            "on-screen text left as-is", window_ok, caret_ok,
+                            ledger_ok)
+        self._status.committed_text = polished
+        self._status.state = "idle"
+        self._notify_tray()
+        log.info("Polished final text: %r", polished)
+        return polished
+
     def _wait_hold_release(self, timeout: float = 2.0) -> None:
         """Block until the hotkey is released (or a short timeout elapses).
 

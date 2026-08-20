@@ -56,7 +56,8 @@ def show_settings_dialog(settings, on_save=None) -> bool:
     mode_var = tk.StringVar(value=settings.mode)
     lang_var = tk.StringVar(value=settings.language or "")
     glossary_var = tk.StringVar(value=", ".join(settings.glossary))
-    cleanup_var = tk.BooleanVar(value=bool(settings.cleanup_model))
+    cleanup_mode_var = tk.StringVar(
+        value=settings.cleanup_mode if settings.cleanup_model else "off")
     autostart_var = tk.BooleanVar(value=settings.autostart)
     overlay_var = tk.BooleanVar(value=bool(getattr(settings, "overlay", True)))
     app_tone_var = tk.BooleanVar(value=bool(getattr(settings, "app_tone", True)))
@@ -91,8 +92,15 @@ def show_settings_dialog(settings, on_save=None) -> bool:
         row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
     row += 1
 
-    cleanup_chk = ttk.Checkbutton(frm, variable=cleanup_var)
-    field(row, "AI cleanup (removes um's, fixes punctuation)", cleanup_chk)
+    cleanup_box = ttk.Combobox(frm, textvariable=cleanup_mode_var,
+                               state="readonly",
+                               values=("off", "correcting", "conservative",
+                                       "polish"), width=28)
+    field(row, "AI cleanup", cleanup_box)
+    ttk.Label(frm,
+              text="off=none · correcting=grammar · conservative=verbatim\n"
+                   "polish=grammar + sentence structure (Polish button in popup)").grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
     row += 1
 
     overlay_chk = ttk.Checkbutton(frm, variable=overlay_var)
@@ -153,7 +161,10 @@ def show_settings_dialog(settings, on_save=None) -> bool:
             "hotkey": hotkey,
             "mode": mode_var.get(),
             "language": lang_var.get().strip() or None,
-            "cleanup_model": "llama-3.3-70b-versatile" if cleanup_var.get() else None,
+            "cleanup_model": "llama-3.3-70b-versatile"
+            if cleanup_mode_var.get() != "off" else None,
+            "cleanup_mode": cleanup_mode_var.get()
+            if cleanup_mode_var.get() != "off" else "correcting",
             "autostart": autostart_var.get(),
             "overlay": overlay_var.get(),
             "app_tone": app_tone_var.get(),

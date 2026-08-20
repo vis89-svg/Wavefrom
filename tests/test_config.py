@@ -121,6 +121,26 @@ def test_load_config_reads_domain_hint():
     assert cfg.domain_hint == "software development"
 
 
+def test_polish_cleanup_mode_accepted():
+    import os
+    os.environ["CLEANUP_MODE"] = "polish"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("CLEANUP_MODE", None)
+    assert cfg.cleanup_mode == "polish"
+
+
+def test_invalid_cleanup_mode_falls_back_to_correcting():
+    import os
+    os.environ["CLEANUP_MODE"] = "banana"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("CLEANUP_MODE", None)
+    assert cfg.cleanup_mode == "correcting"
+
+
 def test_get_api_key_handles_bom_env(monkeypatch, tmp_path):
     # .env written by some editors starts with a UTF-8 BOM, which python-dotenv
     # can't parse on the first line; get_api_key must still find the key.

@@ -1,6 +1,6 @@
 """Cleanup prompt/mode selection tests (no network)."""
-from src.cleanup import (CONSERVATIVE_PROMPT, CORRECTING_PROMPT, RECONCILE_PROMPT,
-                         SYSTEM_PROMPT, CleanupClient)
+from src.cleanup import (CONSERVATIVE_PROMPT, CORRECTING_PROMPT, POLISH_PROMPT,
+                         RECONCILE_PROMPT, SYSTEM_PROMPT, CleanupClient)
 from src.merge import Dispute
 
 
@@ -63,6 +63,43 @@ def test_no_glossary_leaves_prompt_unchanged():
 
 def test_system_prompt_alias_is_correcting():
     assert SYSTEM_PROMPT == CORRECTING_PROMPT
+
+
+def test_polish_mode_accepted():
+    client = CleanupClient(api_key="test-key", mode="polish")
+    assert client.mode == "polish"
+    assert client.system_prompt.startswith(POLISH_PROMPT)
+
+
+def test_polish_prompt_has_structure_rules():
+    assert "split run-on sentences" in POLISH_PROMPT
+    assert "join sentence fragments" in POLISH_PROMPT
+    assert "Fix grammar: subject-verb agreement" in POLISH_PROMPT
+    assert "Never change the meaning" in POLISH_PROMPT
+    assert "When in doubt" in POLISH_PROMPT
+
+
+def test_polish_uses_dedicated_prompt_regardless_of_mode(monkeypatch):
+    client = CleanupClient(api_key="test-key", mode="conservative")
+    sent = {}
+
+    class FakeResponse:
+        choices = [type("C", (), {"message": type("M", (), {
+            "content": "Polished text."})})()]
+
+    def capture(**kw):
+        sent["system"] = kw["messages"][0]["content"]
+        return FakeResponse()
+
+    monkeypatch.setattr(client._client.chat.completions, "create", capture)
+    out = client.polish("hello")
+    assert out == "Polished text."
+    assert sent["system"].startswith(POLISH_PROMPT)
+
+
+def test_polish_keeps_input_when_empty():
+    client = CleanupClient(api_key="test-key")
+    assert client.polish("   ") == "   "
 
 
 def test_prompts_guard_against_omission():

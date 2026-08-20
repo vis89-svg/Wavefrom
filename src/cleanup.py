@@ -34,6 +34,28 @@ CONSERVATIVE_PROMPT = (
     + "- Preserve every word as spoken, including names and numbers.\n"
 )
 
+POLISH_PROMPT = (
+    _CORE
+    + "- Fix grammar: subject-verb agreement, tense, articles, prepositions, "
+    "and word order within a sentence.\n"
+    "- Fix sentence structure: split run-on sentences, join sentence fragments "
+    "into grammatical sentences, and break text into well-formed sentences.\n"
+    "- Only reorder words inside a sentence when needed for correct grammar or "
+    "natural flow. Do not reorder or rearrange sentences.\n"
+    "- Never change the meaning, facts, numbers, dates, or any content that was "
+    "spoken.\n"
+    "- NEVER change proper nouns, place names, personal names, organization "
+    "names, Indian place names, or any capitalized words unless they are "
+    "clearly a common English word that was misheard.\n"
+    "- Preserve glossary/technical terms and quoted phrases exactly as written.\n"
+    "- If the speaker corrected themselves mid-sentence (e.g. 'no, actually', "
+    "'wait,', 'I mean', 'make that', 'scratch that'), output ONLY the final "
+    "corrected version and drop the superseded part that the speaker rejected.\n"
+    "- CRITICAL: When in doubt, ALWAYS keep the original wording unchanged. "
+    "It is far better to leave slightly imperfect grammar than to invent or "
+    "drop content the speaker never said.\n"
+)
+
 CORRECTING_PROMPT = (
     _CORE
     + "- NEVER change proper nouns, place names, personal names, organization "
@@ -127,7 +149,8 @@ class CleanupClient:
                  correction_map: dict[str, str] | None = None):
         self._client = Groq(api_key=api_key)
         self._model = model
-        self.mode = mode if mode in ("correcting", "conservative") else "correcting"
+        self.mode = (mode if mode in ("correcting", "conservative", "polish")
+                     else "correcting")
         seen: set[str] = set()
         terms: list[str] = []
         for t in (glossary or []):
@@ -143,6 +166,8 @@ class CleanupClient:
     def system_prompt(self) -> str:
         if self.mode == "conservative":
             base = CONSERVATIVE_PROMPT
+        elif self.mode == "polish":
+            base = POLISH_PROMPT
         else:
             base = CORRECTING_PROMPT
         return base + _glossary_line(self.glossary) + _correction_map_line(self.correction_map)
@@ -155,6 +180,25 @@ class CleanupClient:
             model=self._model,
             messages=[
                 {"role": "system", "content": self.system_prompt + hint},
+                {"role": "user", "content": transcript},
+            ],
+            temperature=0.2,
+        )
+        return response.choices[0].message.content or transcript
+
+    def polish(self, transcript: str, app_hint: str | None = None) -> str:
+        """On-demand sentence-structure + grammar polish of an already-cleaned
+        transcript. Uses the dedicated POLISH_PROMPT regardless of the mode the
+        client was constructed with."""
+        if not transcript.strip():
+            return transcript
+        hint = _app_tone_line(app_hint) if app_hint else ""
+        prompt = POLISH_PROMPT + _glossary_line(self.glossary) \
+            + _correction_map_line(self.correction_map)
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": prompt + hint},
                 {"role": "user", "content": transcript},
             ],
             temperature=0.2,

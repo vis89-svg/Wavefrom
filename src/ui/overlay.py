@@ -49,6 +49,43 @@ _WS_EX_TOOLWINDOW = 0x00000080
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
+_SPI_GETWORKAREA = 0x0030
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def _work_area() -> tuple[int, int, int, int] | None:
+    """Visible desktop area excluding the taskbar, or None on failure."""
+    rect = _RECT()
+    if _user32.SystemParametersInfoW(_SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+        return rect.left, rect.top, rect.right, rect.bottom
+    return None
+
+
+def _clamp_pos(x: int, y: int, w: int, h: int,
+               left: int, top: int, right: int, bottom: int,
+               gap: int = 14, margin: int = 8,
+               offset_x: int = _OFFSET_X, offset_y: int = _OFFSET_Y
+               ) -> tuple[int, int]:
+    """Clamp a w×h panel into the work area, preferring above (x, y).
+
+    The panel sits with its bottom `gap` pixels above the cursor when there is
+    room, otherwise just below it. In all cases it is fully inside
+    [left+margin, right-margin] x [top+margin, bottom-margin] so the whole
+    panel (including the button row) stays on-screen.
+    """
+    px = min(max(x + offset_x, left + margin),
+             max(right - w - margin, left + margin))
+    py = y - h - gap
+    if py < top + margin:
+        py = y + offset_y
+    py = min(max(py, top + margin),
+             max(bottom - h - margin, top + margin))
+    return px, py
+
 
 def _cursor_pos() -> tuple[int, int]:
     class POINT(ctypes.Structure):
@@ -61,16 +98,26 @@ def _cursor_pos() -> tuple[int, int]:
 
 
 class OverlayWindow:
-    """Thread-safe overlay. All Tk work happens on its own daemon thread."""
+    """Thread-safe overlay. All Tk work happens on its own daemon thread.
+
+    Two visual modes:
+      - live indicator (recording/transcribing/cleaning): click-through waveform
+        + short text preview near the cursor, mirrors the "Flow Bar".
+      - review panel ("done"): stays open showing the full cleaned text with a
+        Polish button and an X (close) button. Click-through is disabled so the
+        buttons are clickable; it closes on X or when a new dictation starts.
+    """
 
     def __init__(self):
         self._q: queue.Queue[tuple] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._root: tk.Tk | None = None
         self._visible = False
-        self._state_seq = 0
         self._levels: list[float] = [0.0] * _BAR_COUNT
         self._t0 = time.monotonic()
+        self._polish_callback = None
+        self._polishing = False
+        self._panel_shown = False
 
     # ------------------------------------------------------------ public API
     def start(self) -> None:
@@ -90,6 +137,10 @@ class OverlayWindow:
 
     def set_level(self, db: float) -> None:
         self._q.put(("level", db))
+
+    def set_polish_callback(self, callback) -> None:
+        """callback() -> polished text or None. Called off the Tk thread."""
+        self._polish_callback = callback
 
     # ------------------------------------------------------------ tk thread
     def _run(self) -> None:
@@ -122,6 +173,35 @@ class OverlayWindow:
             wraplength=330, justify="left", anchor="w")
         self._preview_lbl.pack(fill="x", padx=10, pady=(2, 8))
 
+        # Review panel: full cleaned text + Polish / X buttons (shown on "done").
+        self._panel = tk.Frame(frame, bg=frame["bg"])
+        self._txt = tk.Text(
+            self._panel, height=8, width=40, wrap="word", font=("Segoe UI", 9),
+            bg="#181c21", fg="#e6e9ee", insertbackground="#e6e9ee",
+            relief="flat", padx=8, pady=6)
+        self._txt_scroll = tk.Scrollbar(self._panel, orient="vertical",
+                                        command=self._txt.yview)
+        self._txt.configure(yscrollcommand=self._txt_scroll.set)
+        self._txt.grid(row=0, column=0, sticky="nsew", padx=(10, 0), pady=(2, 4))
+        self._txt_scroll.grid(row=0, column=1, sticky="ns", pady=(2, 4))
+        self._txt.config(state="disabled")
+
+        btn_row = tk.Frame(self._panel, bg=frame["bg"])
+        btn_row.grid(row=1, column=0, columnspan=2, sticky="ew",
+                     padx=10, pady=(0, 8))
+        self._polish_btn = tk.Button(
+            btn_row, text="Polish", font=("Segoe UI", 9, "bold"),
+            bg="#4a90d9", fg="white", activebackground="#5ba0e0",
+            activeforeground="white", relief="flat", padx=12,
+            command=self._on_polish)
+        self._polish_btn.pack(side="left")
+        self._close_btn = tk.Button(
+            btn_row, text="X", font=("Segoe UI", 9, "bold"),
+            bg="#3a4048", fg="#d7dbe0", activebackground="#e5484d",
+            activeforeground="white", relief="flat", padx=8,
+            command=self._on_close)
+        self._close_btn.pack(side="right")
+
         self._bar_ids = [
             self._bars.create_rectangle(0, 0, 0, 0, fill="#30a46c",
                                         outline="")
@@ -142,12 +222,17 @@ class OverlayWindow:
                     self._root.destroy()
                 self._root = None
                 return
-            if kind == "level":
-                self._levels.pop(0)
-                self._levels.append(float(payload))
-            elif kind == "state":
-                state, text = payload
-                self._apply_state(state, text)
+            try:
+                if kind == "level":
+                    self._levels.pop(0)
+                    self._levels.append(float(payload))
+                elif kind == "state":
+                    state, text = payload
+                    self._apply_state(state, text)
+                elif kind == "polish_result":
+                    self._apply_polish_result(payload)
+            except Exception:
+                log.exception("Overlay message %r failed", kind)
 
     def _apply_state(self, state: str, text: str) -> None:
         if not self._root:
@@ -157,7 +242,6 @@ class OverlayWindow:
                 self._root.withdraw()
                 self._visible = False
             return
-        self._state_seq += 1
         if not self._visible:
             self._place_near_cursor()
             self._visible = True
@@ -165,21 +249,76 @@ class OverlayWindow:
         self._state_lbl.config(text=_STATE_LABELS.get(state, state),
                                fg=color)
         self._dot.config(bg=color)
+        if state == "done":
+            self._show_panel(text)
+        else:
+            self._show_live(text)
+
+    def _show_live(self, text: str) -> None:
+        # Live indicator mode: click-through, waveform + short preview.
+        if self._panel_shown:
+            self._panel.pack_forget()
+            self._panel_shown = False
+            self._preview_lbl.pack(fill="x", padx=10, pady=(2, 8))
+        self._make_click_through()
         preview = (text or "").strip()
         if len(preview) > _PREVIEW_CHARS:
             preview = "…" + preview[-_PREVIEW_CHARS:]
         self._preview_lbl.config(text=preview)
-        if state == "done":
-            # brief "Done" confirmation, then fade out until the next dictation
-            seq = self._state_seq
-            self._root.after(2800, lambda: self._maybe_auto_hide(seq))
 
-    def _maybe_auto_hide(self, seq: int) -> None:
-        if not self._root:
+    def _show_panel(self, text: str) -> None:
+        # Review panel mode: full text + Polish/X, interactive (no click-through),
+        # stays open until X is clicked or a new dictation starts.
+        if not self._panel_shown:
+            self._preview_lbl.pack_forget()
+            self._panel.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+            self._panel_shown = True
+        self._txt.config(state="normal")
+        self._txt.delete("1.0", "end")
+        self._txt.insert("1.0", (text or "").strip())
+        self._txt.config(state="disabled")
+        self._polishing = False
+        self._polish_btn.config(state="normal", text="Polish")
+        self._place_review_panel()
+        self._set_interactive(True)
+
+    def _apply_polish_result(self, result) -> None:
+        if not self._root or not self._panel_shown:
             return
-        if seq != self._state_seq:
-            return  # a newer state took over
-        if self._visible:
+        self._polishing = False
+        if result:
+            self._polish_btn.config(state="normal", text="Polish")
+            self._txt.config(state="normal")
+            self._txt.delete("1.0", "end")
+            self._txt.insert("1.0", (result or "").strip())
+            self._txt.config(state="disabled")
+            self._state_lbl.config(text="Polished", fg=_STATE_COLORS["done"])
+        else:
+            self._polish_btn.config(state="normal", text="Polish")
+            self._state_lbl.config(text="Polish failed", fg="#e5484d")
+
+    def _on_polish(self) -> None:
+        if self._polishing:
+            return
+        if self._polish_callback is None:
+            self._state_lbl.config(text="Polish unavailable", fg="#e5484d")
+            return
+        self._polishing = True
+        self._polish_btn.config(state="disabled", text="Polishing…")
+        threading.Thread(target=self._run_polish, daemon=True,
+                         name="overlay-polish").start()
+
+    def _run_polish(self) -> None:
+        try:
+            result = self._polish_callback()
+        except Exception as e:
+            log.warning("Polish pass failed: %s", e)
+            result = None
+        if self._root:
+            self._q.put(("polish_result", result))
+
+    def _on_close(self) -> None:
+        if self._root:
             self._root.withdraw()
             self._visible = False
 
@@ -198,21 +337,56 @@ class OverlayWindow:
         self._root.deiconify()
         self._make_click_through()
 
+    def _place_review_panel(self) -> None:
+        """Place the review panel so the whole window (buttons included) is on
+        screen, preferring above the cursor. Uses the final requested size that
+        already includes the panel — unlike _place_near_cursor, which sizes to
+        the small live indicator and would push the button row off the bottom
+        of the screen when dictating near it."""
+        if not self._root:
+            return
+        x, y = _cursor_pos()
+        self._root.update_idletasks()
+        w = self._root.winfo_reqwidth()
+        h = self._root.winfo_reqheight()
+        area = _work_area()
+        if area is None:
+            left, top = 0, 0
+            right = self._root.winfo_screenwidth()
+            bottom = self._root.winfo_screenheight()
+        else:
+            left, top, right, bottom = area
+        px, py = _clamp_pos(x, y, w, h, left, top, right, bottom)
+        self._root.geometry(f"+{px}+{py}")
+        self._root.deiconify()
+
     def _make_click_through(self) -> None:
+        self._set_interactive(False)
+
+    def _set_interactive(self, interactive: bool) -> None:
+        """Toggle whether the window receives mouse clicks.
+
+        Live indicator mode is click-through (WS_EX_TRANSPARENT) so it never
+        blocks the app underneath. The review panel clears that flag so the
+        Polish / X buttons are clickable.
+        """
         try:
-            # Tk's toplevel window handle is the parent of winfo_id()'s child.
             hwnd = _user32.GetParent(self._root.winfo_id())
             if not hwnd:
                 return
             SetWindowLongPtrW = _user32.SetWindowLongPtrW
             style = SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, 0)
-            if style:
-                SetWindowLongPtrW(
-                    hwnd, _GWL_EXSTYLE,
-                    style | _WS_EX_LAYERED | _WS_EX_TRANSPARENT
-                    | _WS_EX_TOOLWINDOW)
+            if not style:
+                return
+            if interactive:
+                style = style & ~_WS_EX_TRANSPARENT
+            else:
+                style = style | _WS_EX_TRANSPARENT
+            SetWindowLongPtrW(
+                hwnd, _GWL_EXSTYLE,
+                style | _WS_EX_LAYERED | _WS_EX_TOOLWINDOW)
         except Exception as e:
-            log.debug("Click-through style failed: %s", e)
+            log.debug("Click-through toggle failed: %s", e)
 
     def _tick(self) -> None:
         if not self._root:

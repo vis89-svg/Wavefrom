@@ -935,6 +935,76 @@ def test_correction_skipped_when_foreground_window_changes(monkeypatch):
     assert injector.deleted == 0            # but the correction was skipped
 
 
+# ------------------------------------------------------- on-demand polish pass
+
+
+def _engine_with_polish_cleaner(injector):
+    transcriber = FakeTranscriber(["irrelevant"])
+    engine = make_engine(transcriber, injector)
+
+    class FakeCleaner:
+        def polish(self, raw, app_hint=None):
+            return "hello world, everyone here."
+
+    engine._cleaner = FakeCleaner()
+    return engine
+
+
+def test_engine_polish_replaces_text_via_guarded_diff(monkeypatch):
+    from src import inject as inject_mod
+    snapshots = iter([
+        {"hwnd": 100, "caret": (500, 100)},
+        {"hwnd": 100, "caret": (500, 100)},
+    ])
+    monkeypatch.setattr(inject_mod, "capture_typing_context",
+                        lambda: next(snapshots))
+
+    injector = FakeInjector()
+    engine = _engine_with_polish_cleaner(injector)
+    engine._committed = ["hello", "world"]
+    engine._typed_text = "hello world"
+    engine._typed_chars = len("hello world")
+    engine._status.committed_text = "hello world"
+
+    result = engine.polish()
+
+    assert result == "hello world, everyone here."
+    assert engine.status.committed_text == result
+    assert injector.deleted == 0                      # shared prefix kept
+    assert injector.parts == [", everyone here."]
+
+
+def test_engine_polish_returns_none_without_cleaner():
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["x"]), injector)
+    engine._status.committed_text = "hello"
+    assert engine.polish() is None
+    assert injector.parts == []
+
+
+def test_engine_polish_skipped_when_window_changes(monkeypatch):
+    from src import inject as inject_mod
+    snapshots = iter([
+        {"hwnd": 100, "caret": (500, 100)},
+        {"hwnd": 200, "caret": (500, 100)},   # focus moved during the LLM call
+    ])
+    monkeypatch.setattr(inject_mod, "capture_typing_context",
+                        lambda: next(snapshots))
+
+    injector = FakeInjector()
+    engine = _engine_with_polish_cleaner(injector)
+    engine._committed = ["hello", "world"]
+    engine._typed_text = "hello world"
+    engine._typed_chars = len("hello world")
+    engine._status.committed_text = "hello world"
+
+    result = engine.polish()
+
+    assert result == "hello world, everyone here."   # text still produced
+    assert injector.parts == []                       # but nothing typed
+    assert injector.deleted == 0                      # screen left untouched
+
+
 def test_correction_skipped_when_caret_moves(monkeypatch):
     from src import inject as inject_mod
     snapshots = iter([
