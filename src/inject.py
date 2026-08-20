@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import time
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+log = logging.getLogger(__name__)
 
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
@@ -15,6 +18,15 @@ VK_BACK = 0x08
 
 CHAR_DELAY_SECS = 0.03  # keep apps from dropping keystrokes
 BACKSPACE_DELAY_SECS = 0.008
+
+# Virtual key codes for the modifier keys. Apps read the *physical* modifier
+# state (GetKeyState/GetAsyncKeyState) even for SendInput UNICODE characters,
+# so typing while the user still holds Ctrl/Alt/Shift/Win turns the typed text
+# into app shortcuts (Ctrl+S = Save As, etc.). Injection must wait for these
+# to be released first.
+MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # shift, ctrl, alt, lwin, rwin
+RELEASE_POLL_SECS = 0.05
+RELEASE_TIMEOUT_SECS = 5.0
 
 
 class _KEYBDINPUT(ctypes.Structure):
@@ -62,6 +74,25 @@ def _send_key(vk: int, keyup: bool) -> None:
     inp = _INPUT(type=INPUT_KEYBOARD, ki=_KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags))
     if not user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)):
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def modifiers_down() -> bool:
+    """True if any Ctrl/Alt/Shift/Win key is physically held right now."""
+    for vk in MODIFIER_VKS:
+        if user32.GetAsyncKeyState(vk) & 0x8000:
+            return True
+    return False
+
+
+def wait_for_modifiers_up(timeout: float = RELEASE_TIMEOUT_SECS) -> bool:
+    """Wait until no modifier key is held. Returns True if released in time."""
+    deadline = time.monotonic() + timeout
+    while modifiers_down():
+        if time.monotonic() >= deadline:
+            log.warning("Modifier keys still held after %.1fs; typing anyway", timeout)
+            return False
+        time.sleep(RELEASE_POLL_SECS)
+    return True
 
 
 def _type_char(ch: str) -> None:

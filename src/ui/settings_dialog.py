@@ -10,6 +10,31 @@ from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
 
+# Hotkey combinations reserved by Windows or bound by common apps. Dictating
+# on one of these would trigger the other app's action (autocomplete popup,
+# IME toggle, system menu, ...) alongside dictation.
+HOTKEY_CONFLICTS = {
+    "ctrl+space": "Windows IME toggle, IDE autocomplete, Excel column select",
+    "alt+space": "Windows system menu",
+    "win+space": "Windows keyboard-layout switch",
+    "ctrl+shift+space": "IDE method-parameter hints",
+    "ctrl+alt+del": "Windows Secure Attention (reserved)",
+    "win+l": "Windows lock screen (reserved)",
+    "win+e": "Windows File Explorer",
+    "win+r": "Windows Run dialog",
+    "win+d": "Windows show desktop",
+}
+
+
+def _normalize_hotkey(hotkey: str) -> str:
+    return "+".join(sorted(p.strip() for p in hotkey.split("+") if p.strip()))
+
+
+def _hotkey_conflict(hotkey: str) -> str | None:
+    """Return a description of the app/OS shortcut `hotkey` collides with."""
+    norm = _normalize_hotkey(hotkey)
+    return HOTKEY_CONFLICTS.get(norm)
+
 
 def show_settings_dialog(settings, on_save=None) -> bool:
     """Show the settings window. Returns True if the user saved.
@@ -41,7 +66,7 @@ def show_settings_dialog(settings, on_save=None) -> bool:
         widget.grid(row=row, column=1, sticky="ew", pady=3)
 
     row = 0
-    field(row, "Hotkey (e.g. ctrl+space)",
+    field(row, "Hotkey (e.g. ctrl+win)",
           ttk.Entry(frm, textvariable=hotkey_var, width=30))
     row += 1
 
@@ -87,6 +112,12 @@ def show_settings_dialog(settings, on_save=None) -> bool:
         hotkey = hotkey_var.get().strip().lower()
         if not hotkey:
             messagebox.showerror("Settings", "Hotkey cannot be empty.")
+            return
+        conflict = _hotkey_conflict(hotkey)
+        if conflict:
+            messagebox.showerror(
+                "Settings",
+                f"'{hotkey}' conflicts with {conflict}. Pick another hotkey.")
             return
         key = key_var.get().strip()
         if key:

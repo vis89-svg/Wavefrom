@@ -124,22 +124,36 @@ def _build_pipeline(settings: Settings, api_key: str, inject: bool):
     if settings.cleanup_model and not settings.local_engine:
         cleaner = CleanupClient(api_key, model=settings.cleanup_model,
                                 mode=settings.cleanup_mode,
-                                glossary=settings.glossary)
+                                glossary=settings.glossary,
+                                correction_map=settings.correction_map)
     injector = TextInjector() if inject else None
     return transcriber, cleaner, injector
 
 
+def _normalize_key_name(name: str) -> str:
+    """Map the keyboard lib's canonical names to the tokens used in settings.
+
+    The library reports the Windows key as 'windows' (also 'command' on some
+    builds, with 'left/right windows' variants), but the hotkey string is
+    written as 'win'. Without normalization, hold mode's `mods <= _pressed`
+    check never matches a Win-based hotkey.
+    """
+    n = name.lower()
+    if n in ("windows", "command") or n in ("left windows", "right windows"):
+        return "win"
+    return n
+
+
 class HotkeyController:
-    def __init__(self, mode: str, hotkey: str, on_press, on_release, on_esc):
+    def __init__(self, mode: str, hotkey: str, on_press, on_release):
         self._mode = mode
         self._hotkey = hotkey
         self._on_press = on_press
         self._on_release = on_release
-        self._on_esc = on_esc
         self._pressed = set()
+        self._blocked = set()
         self._was_active = False
         self._hook = None
-        self._esc_handle = None
         self._register()
 
     def _parse(self) -> tuple[set[str], str]:
@@ -149,11 +163,12 @@ class HotkeyController:
         key = parts[-1]
         return mods, key
 
-    def _callback(self, evt) -> None:
+    def _callback(self, evt) -> bool:
+        name = _normalize_key_name(evt.name)
         if evt.event_type == "down":
-            self._pressed.add(evt.name.lower())
+            self._pressed.add(name)
         else:
-            self._pressed.discard(evt.name.lower())
+            self._pressed.discard(name)
 
         mods, key = self._parse()
         active = mods <= self._pressed and key in self._pressed
@@ -167,14 +182,29 @@ class HotkeyController:
                 self._on_press()
         self._was_active = active
 
+        if self._mode != "hold":
+            return True
+
+        # Blocking hook: while the hotkey combo is held, suppress every key so
+        # the focused app never sees Ctrl+Win (or Ctrl+Win+<key>). Return True
+        # (pass-through) for everything else so normal typing is unaffected.
+        # Key-down/up pairs are tracked so releasing a suppressed key doesn't
+        # leave a stray key-up reaching the app.
+        blocked = active
+        if blocked and evt.event_type == "down":
+            self._blocked.add(name)
+        elif evt.event_type == "up" and name in self._blocked:
+            self._blocked.discard(name)
+            blocked = True
+        return not blocked
+
     def _register(self) -> None:
         if self._hook is not None:
             self._unregister()
         if self._mode == "hold":
-            self._hook = keyboard.hook(self._callback)
+            self._hook = keyboard.hook(self._callback, suppress=True)
         else:
-            self._hook = keyboard.add_hotkey(self._hotkey, self._on_press, suppress=False)
-        self._esc_handle = keyboard.add_hotkey("esc", self._on_esc)
+            self._hook = keyboard.add_hotkey(self._hotkey, self._on_press, suppress=True)
 
     def _unregister(self) -> None:
         if self._hook is not None:
@@ -186,12 +216,6 @@ class HotkeyController:
             except Exception:
                 pass
             self._hook = None
-        if self._esc_handle is not None:
-            try:
-                keyboard.remove_hotkey(self._esc_handle)
-            except Exception:
-                pass
-            self._esc_handle = None
 
     def set_hotkey(self, hotkey: str) -> None:
         self._hotkey = hotkey
@@ -278,8 +302,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         engine.stop()
 
     hotkeys = HotkeyController(current_settings["mode"], current_settings["hotkey"],
-                               on_press, on_release, lambda: running.update(v=False))
-    log.info("Dictation ready. Hotkey: %s (mode: %s). Esc to quit.",
+                               on_press, on_release)
+    log.info("Dictation ready. Hotkey: %s (mode: %s).",
              current_settings["hotkey"], current_settings["mode"])
     if settings.tray:
         toast_win(APP_NAME, f"Ready. Hold {current_settings['hotkey']} to dictate.")

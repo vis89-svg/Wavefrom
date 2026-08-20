@@ -39,4 +39,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # Run elevated so the global keyboard hook + SendInput can also reach
+    # admin/elevated windows (else dictation silently fails there).
+    uac_admin=True,
 )

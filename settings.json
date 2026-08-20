@@ -1,5 +1,5 @@
 {
-  "hotkey": "ctrl+space",
+  "hotkey": "ctrl+win",
   "mode": "hold",
   "whisper_model": "whisper-large-v3-turbo",
   "cleanup_model": "openai/gpt-oss-20b",
@@ -15,7 +15,10 @@
   "domain_hint": "Indian English speech, official government letter, zoo wildlife management, superintendent, institution, intimated, hippopotamus, shifting",
   "glossary": [
     "Thrissur",
+    "Tshushur",
+    "Trishur",
     "Puthoor",
+    "Puthur",
     "Kerala",
     "Superintendent",
     "Superintendent-In-Charge",
@@ -28,7 +31,14 @@
     "officials",
     "regular feed"
   ],
-  "verify": false,
+  "correction_map": {
+    "Tshushur": "Thrissur",
+    "Trishur": "Thrissur",
+    "Puthur": "Puthoor",
+    "Keral": "Kerala",
+    "hippo potamus": "hippopotamus"
+  },
+  "verify": true,
   "verify_model": null,
   "version": 2,
   "groq_api_key": ""

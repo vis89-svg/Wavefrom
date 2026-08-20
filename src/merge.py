@@ -17,6 +17,64 @@ def _norm(w: str) -> str:
     return "".join(c for c in w.casefold() if c.isalnum())
 
 
+def fuzzy_glossary_replace(text: str, glossary: list[str], threshold: float = 0.75) -> str:
+    """Replace words that are close-but-wrong spellings of glossary terms.
+
+    Handles both single-word and multi-word glossary terms (e.g. "hippo
+    potamus" -> "hippopotamus").  Multi-word matches use a slightly lower
+    threshold because ASR often splits compound words.
+    """
+    if not glossary:
+        return text
+    words = text.split()
+    skip = set()
+    # --- multi-word terms first (greedy, longest match wins) ---
+    multi = sorted(
+        [t for t in glossary if " " in t], key=lambda t: -len(t.split())
+    )
+    for term in multi:
+        t_parts = term.split()
+        n = len(t_parts)
+        t_normed = [_norm(p) for p in t_parts]
+        for i in range(len(words) - n + 1):
+            if any(j in skip for j in range(i, i + n)):
+                continue
+            candidate = [_norm(words[i + j]) for j in range(n)]
+            # exact norm match -> already correct, skip
+            if candidate == t_normed:
+                continue
+            avg = sum(
+                difflib.SequenceMatcher(None, candidate[j], t_normed[j]).ratio()
+                for j in range(n)
+            ) / n
+            if avg >= threshold - 0.05:
+                words[i : i + n] = [term]
+                skip = set()
+                break
+    # --- single-word terms ---
+    for i, word in enumerate(words):
+        if i in skip:
+            continue
+        normed = _norm(word)
+        if not normed:
+            continue
+        best_term = None
+        best_ratio = 0.0
+        for term in glossary:
+            if " " in term:
+                continue
+            t_norm = _norm(term)
+            if t_norm == normed:
+                break
+            ratio = difflib.SequenceMatcher(None, normed, t_norm).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_term = term
+        if best_ratio >= threshold and best_term is not None:
+            words[i] = best_term
+    return " ".join(words)
+
+
 def merge_segments(committed: list[str], new_text: str,
                    max_overlap: int | None = None) -> tuple[list[str], str]:
     """Merge a new transcript into already-committed words.

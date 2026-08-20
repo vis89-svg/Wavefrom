@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import sounddevice as sd
 
+from src.inject import modifiers_down, wait_for_modifiers_up
 from src.merge import (PUNCT, _is_subsequence, _norm, apply_disputes,
                        collapse_adjacent_repeats, diff_plan, ensure_period,
                        find_disputed_blocks, merge_segments,
@@ -251,9 +252,17 @@ class DictationEngine:
                     appended = (appended + " " if appended else "") + "."
                 self._typed_text = " ".join(self._committed)
         if self._injector and appended:
-            sep = "" if (not self._typed_text or self._typed_text.endswith(" ")
-                         or appended.startswith(" ")) else " "
-            self._injector.inject_text(sep + appended)
+            if modifiers_down():
+                # The user is still holding the hotkey modifiers. Typing now
+                # would reach the focused app as Ctrl+Win+<char> (or Ctrl+S
+                # style shortcuts once one modifier is released). The text is
+                # committed and gets retyped at finalize via diff_plan, so it
+                # is safe to skip.
+                log.debug("Modifiers held; deferring partial typing")
+            else:
+                sep = "" if (not self._typed_text or self._typed_text.endswith(" ")
+                             or appended.startswith(" ")) else " "
+                self._injector.inject_text(sep + appended)
         self._status.committed_text = self._typed_text
         self._status.state = "recording" if self._active.is_set() else "idle"
         self._notify_tray()
@@ -295,6 +304,15 @@ class DictationEngine:
         if final[-1] not in PUNCT:
             final += "."
 
+        correction_map = getattr(self._config, "correction_map", None) or {}
+        if correction_map:
+            for wrong, right in correction_map.items():
+                final = final.replace(wrong, right)
+
+        from src.merge import fuzzy_glossary_replace
+        glossary = getattr(self._config, "glossary", None) or []
+        final = fuzzy_glossary_replace(final, glossary)
+
         if self._cleaner:
             self._status.state = "cleaning"
             self._notify_tray()
@@ -304,6 +322,11 @@ class DictationEngine:
                 log.warning("Cleanup failed, using raw transcript: %s", e)
 
         if self._injector and wav_bytes:
+            # Wait until the user's fingers are off the hotkey modifiers.
+            # Typing while Ctrl/Alt/Win is still held makes the focused app
+            # read the text as shortcuts (e.g. a leading 's' becomes Ctrl+S,
+            # opening a Save As dialog and swallowing the rest of the text).
+            wait_for_modifiers_up()
             to_delete, to_type = diff_plan(typed, final)
             if to_delete:
                 self._injector.delete_chars(to_delete)
@@ -507,7 +530,8 @@ class DictationEngine:
                 self._cleaner = CleanupClient(
                     api_key, model=settings.cleanup_model,
                     mode=settings.cleanup_mode,
-                    glossary=settings.glossary)
+                    glossary=settings.glossary,
+                    correction_map=settings.correction_map)
         else:
             self._cleaner = None
 

@@ -43,7 +43,7 @@ except ImportError:
 
 @dataclass
 class Settings:
-    hotkey: str = "ctrl+space"
+    hotkey: str = "ctrl+win"
     mode: str = "hold"  # hold | tap
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
@@ -58,6 +58,7 @@ class Settings:
     vad_filter: bool = False  # local engine only; off = keep all spoken content
     domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
     glossary: list[str] = field(default_factory=list)  # names/terms to keep verbatim
+    correction_map: dict[str, str] = field(default_factory=dict)  # wrong -> correct mappings
     verify: bool = True       # cross-check final pass with a second model
     verify_model: str | None = None  # None = pick the other large Whisper model
     version: int = 2
@@ -66,35 +67,9 @@ class Settings:
     @property
     def use_cloud(self) -> bool:
         return not self.local_engine
+
 
 Config = Settings  # backwards compatibility; new code should use Settings
-
-
-@dataclass
-class Settings:
-    hotkey: str = "ctrl+space"
-    mode: str = "hold"  # hold | tap
-    whisper_model: str = DEFAULT_WHISPER_MODEL
-    cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
-    cleanup_mode: str = "correcting"  # correcting | conservative
-    language: str | None = "en"  # forced decode language (None = auto-detect)
-    sample_rate: int = DEFAULT_SAMPLE_RATE
-    toasts: bool = True
-    tray: bool = True
-    autostart: bool = False
-    local_engine: bool = False
-    local_model: str = "small"
-    vad_filter: bool = False  # local engine only; off = keep all spoken content
-    domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
-    glossary: list[str] = field(default_factory=list)  # names/terms to keep verbatim
-    verify: bool = True       # cross-check final pass with a second model
-    verify_model: str | None = None  # None = pick the other large Whisper model
-    version: int = 2
-    groq_api_key: str = ""
-
-    @property
-    def use_cloud(self) -> bool:
-        return not self.local_engine
 
 
 # ---------------------------------------------------------------- settings file

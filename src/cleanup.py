@@ -74,10 +74,16 @@ RECONCILE_PROMPT = (
 BATCH_LIMIT = 4
 
 _GLOSSARY_RULE = (
-    "User-specific names and terms that MUST be spelled exactly as written "
-    "below. If the transcript contains a close-but-wrong spelling of one of "
-    "these (e.g. a similar-sounding word or a mis-capitalization), fix it to "
-    "the exact form listed. Never change these terms otherwise: "
+    "CRITICAL: The following terms are EXACT spellings that MUST appear in your "
+    "output. If the transcript contains ANY word that sounds similar or is a "
+    "close misspelling of one of these terms, you MUST replace it with the exact "
+    "form below. Do NOT leave misspelled versions. Correct forms: "
+)
+
+_CORRECTION_MAP_RULE = (
+    "The following are KNOWN speech recognition errors that MUST be corrected "
+    "to the canonical spelling. If you see the wrong form in the transcript, "
+    "replace it with the correct form. Never produce the wrong form: "
 )
 
 
@@ -88,9 +94,20 @@ def _glossary_line(glossary: list[str]) -> str:
     return _GLOSSARY_RULE + ", ".join(terms) + ".\n"
 
 
+def _correction_map_line(corrections: dict[str, str]) -> str:
+    if not corrections:
+        return ""
+    pairs = [f"{wrong} -> {right}" for wrong, right in corrections.items()
+             if wrong.strip() and right.strip()]
+    if not pairs:
+        return ""
+    return _CORRECTION_MAP_RULE + "; ".join(pairs) + ".\n"
+
+
 class CleanupClient:
     def __init__(self, api_key: str, model: str = "openai/gpt-oss-20b",
-                 mode: str = "correcting", glossary: list[str] | None = None):
+                 mode: str = "correcting", glossary: list[str] | None = None,
+                 correction_map: dict[str, str] | None = None):
         self._client = Groq(api_key=api_key)
         self._model = model
         self.mode = mode if mode in ("correcting", "conservative") else "correcting"
@@ -102,6 +119,8 @@ class CleanupClient:
                 seen.add(term.lower())
                 terms.append(term)
         self.glossary = terms
+        self.correction_map = {k.strip(): v.strip() for k, v in (correction_map or {}).items()
+                               if k.strip() and v.strip()}
 
     @property
     def system_prompt(self) -> str:
@@ -109,7 +128,7 @@ class CleanupClient:
             base = CONSERVATIVE_PROMPT
         else:
             base = CORRECTING_PROMPT
-        return base + _glossary_line(self.glossary)
+        return base + _glossary_line(self.glossary) + _correction_map_line(self.correction_map)
 
     def clean(self, transcript: str) -> str:
         if not transcript.strip():
