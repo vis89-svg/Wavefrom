@@ -16,7 +16,7 @@ KEYEVENTF_UNICODE = 0x0004
 VK_RETURN = 0x0D
 VK_BACK = 0x08
 
-CHAR_DELAY_SECS = 0.03  # keep apps from dropping keystrokes
+CHAR_DELAY_SECS = 0.015  # keep apps from dropping keystrokes
 BACKSPACE_DELAY_SECS = 0.008
 
 # Virtual key codes for the modifier keys. Apps read the *physical* modifier
@@ -26,7 +26,7 @@ BACKSPACE_DELAY_SECS = 0.008
 # to be released first.
 MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # shift, ctrl, alt, lwin, rwin
 RELEASE_POLL_SECS = 0.05
-RELEASE_TIMEOUT_SECS = 5.0
+RELEASE_TIMEOUT_SECS = 2.0
 
 
 class _KEYBDINPUT(ctypes.Structure):
@@ -67,6 +67,23 @@ class _INPUTUNION(ctypes.Union):
 class _INPUT(ctypes.Structure):
     _anonymous_ = ("u",)
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+_GUI_CARETBLINKING = 0x00000001
+
+
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hwndActive", wintypes.HWND),
+        ("hwndFocus", wintypes.HWND),
+        ("hwndCapture", wintypes.HWND),
+        ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize", wintypes.HWND),
+        ("hwndCaret", wintypes.HWND),
+        ("rcCaret", wintypes.RECT),
+    ]
 
 
 def _send_key(vk: int, keyup: bool) -> None:
@@ -112,6 +129,53 @@ def foreground_window_title() -> str:
     except Exception as e:
         log.debug("foreground_window_title failed: %s", e)
         return ""
+
+
+def foreground_window_handle() -> int:
+    """HWND of the currently focused window (0 if none / on failure)."""
+    try:
+        return int(user32.GetForegroundWindow()) or 0
+    except Exception as e:
+        log.debug("foreground_window_handle failed: %s", e)
+        return 0
+
+
+def foreground_caret() -> tuple[int, int] | None:
+    """Screen-space (left, top) of the focused window's caret, or None when the
+    window does not expose a visible caret (consoles, many editors).
+
+    Used to verify the caret has not moved between the early text type and the
+    final correction — if the user clicked/typed elsewhere, blind backspacing
+    would destroy the wrong text, so the correction must be skipped instead.
+    """
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return None
+        tid = user32.GetWindowThreadProcessId(hwnd, None)
+        gui = _GUITHREADINFO()
+        gui.cbSize = ctypes.sizeof(_GUITHREADINFO)
+        if not user32.GetGUIThreadInfo(tid, ctypes.byref(gui)):
+            return None
+        if not (gui.flags & _GUI_CARETBLINKING):
+            return None
+        if gui.hwndCaret == 0 and gui.rcCaret.left == 0 and gui.rcCaret.top == 0:
+            return None
+        return (gui.rcCaret.left, gui.rcCaret.top)
+    except Exception as e:
+        log.debug("foreground_caret failed: %s", e)
+        return None
+
+
+def capture_typing_context() -> dict:
+    """Snapshot of (foreground hwnd, caret pos) guarding the final correction.
+
+    The engine records this after the early text type and re-reads it before
+    backspacing: if focus moved to another window or the caret moved, the
+    screen no longer matches the engine's bookkeeping and deleting would be
+    unsafe.
+    """
+    return {"hwnd": foreground_window_handle(), "caret": foreground_caret()}
 
 
 def _type_char(ch: str) -> None:

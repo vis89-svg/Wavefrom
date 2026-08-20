@@ -8,6 +8,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import logging
 import logging.handlers
@@ -135,16 +136,45 @@ def _normalize_key_name(name: str) -> str:
 
     The library reports the Windows key as 'windows' (also 'command' on some
     builds, with 'left/right windows' variants), but the hotkey string is
-    written as 'win'. Without normalization, hold mode's `mods <= _pressed`
-    check never matches a Win-based hotkey.
+    written as 'win'. Without normalization, hold mode's hotkey match never
+    recognizes a Win-based combo. Unnamed events (name can be None) return "".
     """
-    n = name.lower()
+    n = (name or "").lower()
     if n in ("windows", "command") or n in ("left windows", "right windows"):
         return "win"
     return n
 
 
+# Virtual key codes for the modifier tokens used in hotkey strings. The
+# generic codes (ctrl/alt/shift) reflect either side being held; the Windows
+# key has no generic code, so both left and right are checked.
+_MOD_VKS = {
+    "ctrl": (0x11,),
+    "alt": (0x12,),
+    "shift": (0x10,),
+    "win": (0x5B, 0x5C),
+}
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+
+def _physically_down(vks) -> bool:
+    """True if any of the given virtual-key codes is physically held."""
+    return any(_user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks)
+
+
 class HotkeyController:
+    # Ignore a press that lands within this long after a release: when a
+    # dictation release blocks the keyboard hook thread while the final text is
+    # being typed, the queued key events burst through afterwards and could
+    # otherwise re-trigger a spurious capture.
+    RELEASE_DEBOUNCE_SECS = 0.25
+    # How often the release watchdog polls the physical combo state. It exists
+    # so a release is detected even if the keyboard event stream misses it
+    # (wedged hook thread, Start menu consuming the Win key-up, callback
+    # exception), guaranteeing the recording stops shortly after the user lets
+    # go of the hotkey.
+    WATCH_POLL_SECS = 0.1
+
     def __init__(self, mode: str, hotkey: str, on_press, on_release):
         self._mode = mode
         self._hotkey = hotkey
@@ -153,7 +183,11 @@ class HotkeyController:
         self._pressed = set()
         self._blocked = set()
         self._was_active = False
+        self._emitted = False
+        self._last_release = 0.0
         self._hook = None
+        self._watch_evt = threading.Event()
+        self._watch_thread: threading.Thread | None = None
         self._register()
 
     def _parse(self) -> tuple[set[str], str]:
@@ -163,20 +197,91 @@ class HotkeyController:
         key = parts[-1]
         return mods, key
 
+    def _combo_evt_down(self) -> bool:
+        """Is the hotkey combo held per the keyboard event stream?
+
+        Tracks the same keys the hook actually sees (down/up events), so a
+        genuine key-up clears it immediately regardless of what GetAsyncKeyState
+        thinks. The final token is normally a modifier; a non-modifier final key
+        (e.g. ctrl+alt+k) is tracked via the event set since it is a momentary
+        tap, not a held modifier.
+        """
+        mods, key = self._parse()
+        if not all(m in self._pressed for m in mods):
+            return False
+        return key in mods or key in self._pressed
+
+    def _combo_phys_down(self) -> bool:
+        """Is every modifier key physically held (GetAsyncKeyState)?
+
+        Physical state can't "stick": the instant the user lets go of a key it
+        stops contributing. But it can LAG: because this hook suppresses the Win
+        key-down/up, Windows' async key-state table never sees the Win key-up
+        and keeps reporting Win as down for a long time. That is exactly why
+        press/suppression require BOTH signals while a release only needs
+        EITHER of them to clear.
+        """
+        mods, _ = self._parse()
+        return all(_physically_down(_MOD_VKS[m]) for m in mods)
+
+    def _combo_down(self) -> bool:
+        """Is the hotkey combo held right now (event AND physical state)?
+
+        The AND means a stuck physical Win can never re-trigger capture or
+        swallow the next Ctrl+C / Ctrl+A / Ctrl+X on its own — the event stream
+        must also agree the combo is down.
+        """
+        return self._combo_evt_down() and self._combo_phys_down()
+
     def _callback(self, evt) -> bool:
+        try:
+            return self._handle(evt)
+        except Exception as e:
+            # Never let a single bad event break the hook: log and pass it
+            # through so the app and later key events keep working.
+            log.warning("Hotkey callback error (event passed through): %s", e)
+            return True
+
+    def _handle(self, evt) -> bool:
         name = _normalize_key_name(evt.name)
         if evt.event_type == "down":
             self._pressed.add(name)
         else:
             self._pressed.discard(name)
 
-        mods, key = self._parse()
-        active = mods <= self._pressed and key in self._pressed
+        active = self._combo_down()
         if self._mode == "hold":
-            if active and not self._was_active:
-                self._on_press()
-            elif not active and self._was_active:
-                self._on_release()
+            now = time.monotonic()
+            if active:
+                if not self._was_active:
+                    self._was_active = True
+                    if now - self._last_release >= self.RELEASE_DEBOUNCE_SECS:
+                        log.info("Hotkey press; watchdog armed")
+                        self._on_press()
+                        self._emitted = True
+                        self._arm_watchdog()
+                    else:
+                        # The release just finished (queued events bursting
+                        # through after the final typing) — ignore this press.
+                        self._emitted = False
+            else:
+                if self._was_active:
+                    # Release fires when EITHER the event stream or the physical
+                    # state says the combo is up. The physical Win key can stay
+                    # stuck "down" for a long time (its suppressed key-up never
+                    # reaches the async state table), so the event key-up alone
+                    # must be enough to end the recording.
+                    if self._emitted:
+                        log.info("Hotkey release (event)")
+                        self._on_release()
+                        self._last_release = now
+                    self._emitted = False
+                    self._was_active = False
+                    # Self-heal: drop any stale/leaked key state now that the
+                    # combo is released, so it can never re-activate on the
+                    # next plain Ctrl press.
+                    self._pressed.clear()
+                    self._blocked.clear()
         elif self._mode == "tap":
             if evt.event_type == "down" and active and not self._was_active:
                 self._on_press()
@@ -198,6 +303,37 @@ class HotkeyController:
             blocked = True
         return not blocked
 
+    def _arm_watchdog(self) -> None:
+        """Start (or reuse) the thread that fires the release if the key events
+        never do. Only one watchdog runs at a time."""
+        if self._watch_thread and self._watch_thread.is_alive():
+            return
+        self._watch_evt.clear()
+        self._watch_thread = threading.Thread(target=self._watchdog_loop,
+                                              daemon=True)
+        self._watch_thread.start()
+
+    def _watchdog_loop(self) -> None:
+        while not self._watch_evt.is_set():
+            if not self._emitted:
+                # The event path already handled the release (or no press was
+                # accepted); nothing left to watch.
+                return
+            # Release when EITHER the event stream or the physical state
+            # clears — same rule as the event path. The physical Win key can
+            # stay stuck "down" (its suppressed key-up never reaches the async
+            # state table), so the event state alone is sufficient to fire.
+            if not self._combo_evt_down() or not self._combo_phys_down():
+                log.info("Hotkey release (watchdog)")
+                self._on_release()
+                self._last_release = time.monotonic()
+                self._emitted = False
+                self._was_active = False
+                self._pressed.clear()
+                self._blocked.clear()
+                return
+            time.sleep(self.WATCH_POLL_SECS)
+
     def _register(self) -> None:
         if self._hook is not None:
             self._unregister()
@@ -207,6 +343,9 @@ class HotkeyController:
             self._hook = keyboard.add_hotkey(self._hotkey, self._on_press, suppress=True)
 
     def _unregister(self) -> None:
+        self._watch_evt.set()
+        if self._watch_thread and self._watch_thread.is_alive():
+            self._watch_thread.join(timeout=1)
         if self._hook is not None:
             try:
                 if self._mode == "hold":
@@ -248,6 +387,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         overlay=overlay,
     )
     running = {"v": True}
+    capture_state = {"on": False}
     tray = None
     current_settings = {"hotkey": settings.hotkey, "mode": settings.mode}
 
@@ -295,17 +435,35 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
 
     def _capture_thread() -> None:
         log.info("Recording...")
-        engine.start()
         try:
             engine.capture()
         except Exception as e:
             log.error("Capture error: %s", e)
             engine.stop()
+        finally:
+            capture_state["on"] = False
 
     def on_press() -> None:
+        if capture_state["on"]:
+            log.debug("Ignoring press while already recording")
+            return
+        capture_state["on"] = True
+        if not engine.start():
+            log.debug("Ignoring press while engine is busy finalizing")
+            capture_state["on"] = False
+            return
+        # Event-driven "combo held" flag (not GetAsyncKeyState, which can stay
+        # stuck "down" on the Win key): drives slice-typing deferral in hold
+        # mode. Tap mode leaves it False so live typing works while recording.
+        if current_settings["mode"] == "hold":
+            engine.set_hold_active(True)
         threading.Thread(target=_capture_thread, daemon=True).start()
 
     def on_release() -> None:
+        # Clear the flag first: the finalize thread reads it to decide whether
+        # it can type immediately. The event key-up always arrives, so this
+        # clears instantly even if the physical Win key is stuck "down".
+        engine.set_hold_active(False)
         engine.stop()
 
     hotkeys = HotkeyController(current_settings["mode"], current_settings["hotkey"],

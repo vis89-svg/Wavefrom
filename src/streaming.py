@@ -19,8 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 import sounddevice as sd
 
-from src.inject import modifiers_down, wait_for_modifiers_up
-from src.merge import (PUNCT, _is_subsequence, _norm, apply_disputes,
+from src.merge import (PUNCT, MIN_REPEAT_WORDS, _norm, apply_disputes,
                        collapse_adjacent_repeats, diff_plan, ensure_period,
                        find_disputed_blocks, merge_segments,
                        strip_trailing_repeat, tokenize, union_text)
@@ -33,11 +32,11 @@ SILENCE_PERIOD_SECS = 1.5
 MAX_SILENCE_SECS = 3.0
 MAX_RECORD_SECS = 120.0
 MAX_PROMPT_CHARS = 400
-FINAL_CHUNK_SECS = 30.0
+FINAL_CHUNK_SECS = 20.0
 FINAL_CHUNK_OVERLAP_SECS = 2.0
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
 _ECHO_TAIL_WORDS = 15  # how many committed words a prompt echo may repeat
-_FULL_PROMPT_ECHO_RATIO = 0.85  # slice ~identical to the whole prompt = echo
+_FULL_PROMPT_ECHO_RATIO = 0.90  # slice ~identical to the whole prompt = echo
 _LEVEL_REPORT_EVERY = 0.1  # seconds between overlay level updates
 
 
@@ -79,18 +78,25 @@ class DictationEngine:
         self._slice_q: queue.Queue[bytes | None] = queue.Queue()
         self._committed: list[str] = []
         self._typed_text = ""
+        self._typed_chars = 0
         self._full_audio: bytes | None = None
         self._last_disputes: list = []
         self._active = threading.Event()
         self._stop_capture = threading.Event()
+        self._busy = threading.Event()
         self._worker: threading.Thread | None = None
         self._status = EngineStatus()
         self._lock = threading.Lock()
         self._pending_period = False
         self._last_level_report = 0.0
+        self._hold_active = False
 
     # ------------------------------------------------------------- lifecycle
-    def start(self) -> None:
+    def start(self) -> bool:
+        if self._busy.is_set():
+            log.warning("Engine busy; ignoring start")
+            return False
+        self._busy.set()
         self._stop_capture.clear()
         self._active.set()
         self._pending_period = False
@@ -98,20 +104,42 @@ class DictationEngine:
         # session stay in _committed and leak into the next prompt/merge.
         self._committed = []
         self._typed_text = ""
+        self._typed_chars = 0
         self._full_audio = None
         self._last_disputes = []
+        # Belt-and-suspenders: in hold mode the engine defers live slice
+        # typing for the whole recording even if the controller's
+        # set_hold_active(True) lands late. Typing while Ctrl+Win is held
+        # would reach the app as shortcuts (no visible text) yet inflate
+        # _typed_text — which previously let the final diff backspace far
+        # beyond this dictation's own text.
+        self._hold_active = getattr(self._config, "mode", "hold") == "hold"
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
+        return True
 
     def stop(self) -> None:
         self._stop_capture.set()
-        self._active.wait(timeout=10)
-        if self._worker and self._worker.is_alive():
-            self._worker.join(timeout=15)
+        # Wait only for the capture loop to exit (recording stopped), not for
+        # the worker's finalize/typing pass — that finishes in the background so
+        # the hotkey hook thread is never blocked for the whole cleanup.
+        if self._active.is_set():
+            self._active.wait(timeout=10)
 
     @property
     def status(self) -> EngineStatus:
         return self._status
+
+    def set_hold_active(self, active: bool) -> None:
+        """Record whether the hotkey combo is held (hold mode).
+
+        Event-driven (set by the hotkey controller from key events), so it
+        clears the instant the key-up is seen — unlike GetAsyncKeyState, which
+        can keep reporting a suppressed Win key as down for a long time. The
+        engine defers live slice typing and gate final typing on this flag
+        instead of polling the physical modifier state.
+        """
+        self._hold_active = active
 
     # ---------------------------------------------------------- capture loop
     def capture(self) -> None:
@@ -186,17 +214,20 @@ class DictationEngine:
 
     # ------------------------------------------------------------ worker loop
     def _worker_loop(self) -> None:
-        while True:
-            try:
-                item = self._slice_q.get(timeout=1.0)
-            except queue.Empty:
-                if not self._active.is_set():
+        try:
+            while True:
+                try:
+                    item = self._slice_q.get(timeout=1.0)
+                except queue.Empty:
+                    if not self._active.is_set():
+                        break
+                    continue
+                if item is None:
                     break
-                continue
-            if item is None:
-                break
-            self._process_slice(item)
-        self._finalize(self._full_audio)
+                self._process_slice(item)
+            self._finalize(self._full_audio)
+        finally:
+            self._busy.clear()
 
     def _process_slice(self, wav_bytes: bytes) -> None:
         self._status.state = "transcribing"
@@ -238,7 +269,7 @@ class DictationEngine:
             # Real speech that merely matches glossary/hint words is NOT an
             # echo — the user legitimately says those words.
             if text.strip() and self._is_prompt_echo(text, prompt):
-                log.debug("Slice is a prompt echo; ignoring: %r", text)
+                log.info("Slice is a prompt echo; ignoring: %r", text)
             else:
                 old_committed = self._committed
                 # 0.4s of audio overlap is only a few words; cap the overlap
@@ -251,8 +282,8 @@ class DictationEngine:
                 # Anything past the overlap was already covered by committed,
                 # so dropping an all-echo tail loses no new speech.
                 if appended.strip() and self._is_prompt_echo(appended, prompt):
-                    log.debug("Slice tail is a prompt echo; dropping: %r",
-                              appended)
+                    log.info("Slice tail is a prompt echo; dropping: %r",
+                             appended)
                     committed = old_committed
                     appended = ""
                 self._committed = committed
@@ -262,19 +293,32 @@ class DictationEngine:
                     appended = (appended + " " if appended else "") + "."
             committed_text = " ".join(self._committed)
         if self._injector and appended:
-            if modifiers_down():
-                # The user is still holding the hotkey modifiers. Typing now
-                # would reach the focused app as Ctrl+Win+<char> (or Ctrl+S
-                # style shortcuts once one modifier is released). The text is
-                # committed and gets retyped at finalize via diff_plan, so it
-                # is safe to skip. _typed_text stays put so the final diff
-                # knows what is really on screen and types the missing tail.
-                log.debug("Modifiers held; deferring partial typing")
+            if self._hold_active or getattr(self._config, "mode", "hold") == "hold":
+                # Hold mode never types slices live: everything is typed at
+                # finalize by the early-type, which runs right after the user
+                # releases. Typing a slice here — even one transcribed after
+                # the release — used to set _typed_text = committed_text,
+                # claiming the WHOLE committed text was on screen when only
+                # this tail was typed. That made the early-type skip (it saw
+                # raw.startswith(typed)) and the final diff skip (to_delete
+                # exceeded the session ledger), so most of the dictation never
+                # appeared and the screen did not match the corrected text.
+                # Deferring keeps _typed_text == "" so the early-type types
+                # the full raw text at release, bounded by the ledger.
+                log.info("Deferring slice text (%d chars) while hotkey held",
+                         len(appended))
             else:
                 sep = "" if (not self._typed_text or self._typed_text.endswith(" ")
                              or appended.startswith(" ")) else " "
                 self._injector.inject_text(sep + appended)
-                self._typed_text = committed_text
+                self._typed_chars += len(sep + appended)
+                # Track the literal screen text, never the whole committed
+                # text: committed may contain deferred content that is not on
+                # screen, and the final diff must only ever delete what was
+                # actually typed by this session.
+                self._typed_text = self._typed_text + sep + appended
+                log.info("Typed slice text (%d chars); session ledger=%d",
+                         len(sep + appended), self._typed_chars)
         elif not self._injector:
             # No injection target (offline/eval): keep the bookkeeping text
             # aligned with committed so status/finalize stay consistent.
@@ -288,10 +332,14 @@ class DictationEngine:
         """True when `text` is Whisper echoing prompt content back, not speech.
 
         Two signals:
-          1. The text is a subsequence of the last committed words — Whisper
-             repeats the context it was just given (overlap/silence re-decode).
+          1. The whole text appears contiguously in the last committed words —
+             a re-decode returned nothing new (the overlap the merge would
+             otherwise deduplicate). Scattered word re-use is real speech and
+             is kept, because dropping it loses the new words mixed in.
           2. The text is (almost) identical to the whole prompt (domain hint +
-             glossary + committed tail) — silence-induced regurgitation.
+             glossary + committed tail) — silence-induced regurgitation. The
+             prompt must be reasonably long and the text long enough that a
+             high ratio is a genuine echo, never a short glossary phrase.
         Glossary/hint words by themselves are never an echo: the user speaks
         them for real, so matching them must not drop dictation.
         """
@@ -299,15 +347,16 @@ class DictationEngine:
         if not tokens:
             return True
         tail = tokenize(" ".join(self._committed[-_ECHO_TAIL_WORDS:]))
-        if _is_subsequence(tokens, tail):
+        if _is_contiguous_run(tokens, tail):
             return True
         if prompt:
             p = tokenize(prompt)
-            if (len(tokens) >= 5 and
+            if (len(tokens) >= 5 and len(p) >= 6 and
                     difflib.SequenceMatcher(None, tokens, p).ratio()
                     >= _FULL_PROMPT_ECHO_RATIO):
                 return True
         return False
+
 
     # -------------------------------------------------------------- overlay
     def set_overlay(self, overlay) -> None:
@@ -357,6 +406,38 @@ class DictationEngine:
         with self._lock:
             raw = " ".join(self._committed)
             typed = self._typed_text
+        # Collapse loops/echoes in the streaming text before it is typed, so
+        # the early-type sends clean text and the final diff has little to
+        # backspace (fewer keystrokes = less room for a destructive diff).
+        raw = strip_trailing_repeat(collapse_adjacent_repeats(raw))
+
+        baseline = None
+        if self._injector and wav_bytes and raw and not self._hold_active:
+            from src.inject import capture_typing_context
+            # Snapshot where the caret/focus is now; the final correction may
+            # only touch this window/position seconds later (after the full
+            # re-transcription + cleanup).
+            baseline = capture_typing_context()
+            # Type the streaming transcript now so text appears immediately
+            # instead of after the expensive full re-transcription + cleanup.
+            # Verbatim (no period) so the final diff_plan baseline matches the
+            # proven tap-mode path; the passes below refine it via diff.
+            if raw.startswith(typed):
+                tail = raw[len(typed):]
+            elif not typed:
+                tail = raw
+            else:
+                tail = ""  # can't cleanly append; the final diff reconciles
+            if tail:
+                try:
+                    self._injector.inject_text(tail)
+                except Exception as e:
+                    log.warning("Early finalize typing failed: %s", e)
+                else:
+                    self._typed_chars += len(tail)
+                    typed = raw
+            log.info("Early-type: typed=%d raw=%d tail=%d ledger=%d",
+                     len(typed), len(raw), len(tail), self._typed_chars)
 
         final = raw
         if wav_bytes:
@@ -410,22 +491,66 @@ class DictationEngine:
                 log.warning("Cleanup failed, using raw transcript: %s", e)
 
         if self._injector and wav_bytes:
-            # Wait until the user's fingers are off the hotkey modifiers.
-            # Typing while Ctrl/Alt/Win is still held makes the focused app
-            # read the text as shortcuts (e.g. a leading 's' becomes Ctrl+S,
-            # opening a Save As dialog and swallowing the rest of the text).
-            wait_for_modifiers_up()
+            # Hold off the final typing while the hotkey is held (e.g. the user
+            # already re-pressed for the next dictation while this finalize
+            # finishes — typing into a held Ctrl+Win would become shortcuts).
+            # This is event-driven, so it clears the instant the key-up is seen
+            # instead of waiting out a stuck physical Win key.
+            self._wait_hold_release()
             to_delete, to_type = diff_plan(typed, final)
-            if to_delete:
-                self._injector.delete_chars(to_delete)
-            if to_type:
-                self._injector.inject_text(to_type)
+            window_ok = caret_ok = ledger_ok = True
+            if baseline is not None:
+                from src.inject import capture_typing_context
+                now = capture_typing_context()
+                if now["hwnd"] != baseline["hwnd"]:
+                    window_ok = False
+                elif baseline["caret"] is not None and now["caret"] is not None:
+                    bx, by = baseline["caret"]
+                    nx, ny = now["caret"]
+                    if nx < bx - 2 or nx > bx + 2 or ny < by - 2 or ny > by + 2:
+                        caret_ok = False
+            if to_delete > self._typed_chars:
+                ledger_ok = False
+            log.info("Final correction: raw=%d typed=%d final=%d prefix=%d "
+                     "to_delete=%d to_type=%d ledger=%d window=%s caret=%s",
+                     len(raw), len(typed), len(final),
+                     len(typed) - to_delete, to_delete, len(to_type),
+                     self._typed_chars, window_ok, caret_ok)
+            if window_ok and caret_ok and ledger_ok:
+                if to_delete:
+                    self._injector.delete_chars(to_delete)
+                    self._typed_chars = max(0, self._typed_chars - to_delete)
+                if to_type:
+                    self._injector.inject_text(to_type)
+                    self._typed_chars += len(to_type)
+            else:
+                # The screen no longer matches the engine's bookkeeping (focus
+                # moved, caret moved, or the bookkeeping claims more text than
+                # this dictation actually typed). Backspacing now could destroy
+                # pre-existing text (e.g. a previous dictation), so leave the
+                # screen untouched — the early-typed raw text stays.
+                log.warning("Correction skipped (window=%s caret=%s ledger=%s); "
+                            "on-screen text left as-is", window_ok, caret_ok,
+                            ledger_ok)
 
         self._status.state = "idle"
         self._status.committed_text = final
         self._overlay_state("done", final)
         self._notify_tray()
         log.info("Dictation finalized: %r", final)
+
+    def _wait_hold_release(self, timeout: float = 2.0) -> None:
+        """Block until the hotkey is released (or a short timeout elapses).
+
+        Event-driven counterpart of the old physical wait_for_modifiers_up:
+        typing while the combo is held would reach the app as shortcuts, but
+        the physical check could be fooled by a stuck Win key for the whole
+        timeout. This polls the engine's hold flag, which the hotkey controller
+        clears on the key-up event — normally zero delay.
+        """
+        deadline = time.monotonic() + timeout
+        while self._hold_active and time.monotonic() < deadline:
+            time.sleep(0.02)
 
     # ------------------------------------------------- full-audio transcription
     def _context_prompt(self, tail: int = 15) -> str | None:
@@ -582,7 +707,8 @@ class DictationEngine:
         pcm, rate = pcm_from_wav(audio_bytes)
         if len(pcm) == 0:
             return ""
-        self.start()
+        if not self.start():
+            return ""
         for wav in slice_audio(pcm, rate):
             self._slice_q.put(wav)
         self._full_audio = _to_wav(pcm, rate)
@@ -685,3 +811,21 @@ def _to_wav(audio: np.ndarray, rate: int) -> bytes:
         w.setframerate(rate)
         w.writeframes(audio.tobytes())
     return buf.getvalue()
+
+
+def _is_contiguous_run(tokens: list[str], tail: list[str]) -> bool:
+    """True when the whole `tokens` list appears verbatim inside `tail`.
+
+    The old subsequence test matched scattered words (greedy iterator), so
+    real speech that merely reused recently-committed words in a new order
+    was dropped as an "echo". Whisper regurgitation is contiguous — only a
+    run that covers the entire text and repeats nothing new is an echo.
+    """
+    if len(tokens) < MIN_REPEAT_WORDS or len(tokens) > len(tail):
+        return False
+    nt = [_norm(w) for w in tokens]
+    ntail = [_norm(w) for w in tail]
+    for i in range(len(ntail) - len(nt) + 1):
+        if ntail[i:i + len(nt)] == nt:
+            return True
+    return False

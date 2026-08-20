@@ -97,6 +97,7 @@ def test_worker_slices_merge_and_type():
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine.set_hold_active(False)  # hotkey released
     engine._slice_q.put(None)  # finalize
     engine._worker.join(timeout=5)
 
@@ -119,6 +120,7 @@ def test_finalize_full_audio_merges_missed_content():
     engine.start()
     engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine.set_hold_active(False)  # hotkey released
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
@@ -140,6 +142,7 @@ def test_finalize_cleanup_replaces_text():
     engine.start()
     engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
     engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine.set_hold_active(False)  # hotkey released
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
@@ -214,17 +217,19 @@ def test_chunked_final_union_recovers_dropped_sentence():
 def test_full_audio_chunked_into_overlapping_windows():
     rate = 16000
     transcriber = FakeTranscriber([
-        "hello world",                  # chunk 1 [0s,30s)
-        "world this is a test",         # chunk 2 [28s,58s) overlap head "world"
-        "test goodbye",                 # chunk 3 [56s,62s)
+        "hello world",                  # chunk 1 [0s,20s)
+        "world this is a test",         # chunk 2 [18s,38s)
+        "test goodbye",                 # chunk 3 [36s,42s)
     ])
     engine = make_engine(transcriber, None)
     engine.start()
-    engine._full_audio = _to_wav(np.zeros(int(rate * 62), dtype=np.int16), rate)
+    engine._full_audio = _to_wav(np.zeros(int(rate * 42), dtype=np.int16), rate)
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
-    # 62s -> 3 chunks, overlap-diff stitched with no duplication/loss
+    # 42s -> 3 chunks (FINAL_CHUNK_SECS=20, overlap 2s), overlap-diff stitched
+    # with no duplication/loss
+    assert len(transcriber.calls) == 3
     assert engine.status.committed_text == "hello world this is a test goodbye."
 
 
@@ -580,6 +585,7 @@ def test_slice_with_adjacent_loop_is_collapsed():
     # Whisper looping "we are done" back to back must type only one copy.
     injector = FakeInjector()
     engine = make_engine(FakeTranscriber(["we are done we are done"]), injector)
+    engine._config.mode = "tap"
 
     engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
 
@@ -591,6 +597,7 @@ def test_slice_short_stutter_is_preserved():
     # Real 1-2 word stutters are speech, never collapsed or dropped.
     injector = FakeInjector()
     engine = make_engine(FakeTranscriber(["no no no and then we left"]), injector)
+    engine._config.mode = "tap"
 
     engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
 
@@ -645,7 +652,7 @@ def test_final_collapses_adjacent_loop():
     assert engine.status.committed_text == "the end is near."
 
 
-def test_modifiers_held_defer_partials_then_final_diff_types_missing_tail(monkeypatch):
+def test_modifiers_held_defer_partials_then_final_diff_types_missing_tail():
     # Bug 1 regression: in hold mode the user holds Ctrl+Win for the WHOLE
     # dictation, so every partial is deferred. _typed_text must reflect only
     # what was actually typed; the final diff must type everything missing.
@@ -655,7 +662,7 @@ def test_modifiers_held_defer_partials_then_final_diff_types_missing_tail(monkey
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
 
-    monkeypatch.setattr(streaming, "modifiers_down", lambda: True)
+    engine.set_hold_active(True)
     engine.start()
     # Short audio (<12s) keeps the finalize on the streaming transcript.
     engine._full_audio = _to_wav(np.zeros(16000 * 5, dtype=np.int16), 16000)
@@ -666,8 +673,7 @@ def test_modifiers_held_defer_partials_then_final_diff_types_missing_tail(monkey
     assert engine._typed_text == ""        # bookkeeping matches reality
 
     # Modifiers released at finalize: the diff must type the whole text.
-    monkeypatch.setattr(streaming, "modifiers_down", lambda: False)
-    monkeypatch.setattr(streaming, "wait_for_modifiers_up", lambda *a, **k: True)
+    engine.set_hold_active(False)
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
@@ -687,6 +693,7 @@ def test_glossary_words_in_speech_are_not_dropped_as_echo():
     engine = make_engine(
         FakeTranscriber(["superintendent intimated institution"]), injector)
     engine._config = config
+    engine._config.mode = "tap"
     engine._committed = ["the", "meeting", "is", "at", "ten"]
     engine._typed_text = "the meeting is at ten"
 
@@ -695,3 +702,250 @@ def test_glossary_words_in_speech_are_not_dropped_as_echo():
     assert engine._committed == ["the", "meeting", "is", "at", "ten",
                                  "superintendent", "intimated", "institution"]
     assert "superintendent intimated institution" in injector.typed
+
+
+def test_stop_never_started_returns_immediately():
+    # Regression: stop() racing ahead of start() used to wait 10s on an event
+    # that would never be set, stalling the hotkey hook thread.
+    transcriber = FakeTranscriber(["x"])
+    engine = make_engine(transcriber, None)
+    engine.stop()
+    assert engine._stop_capture.is_set()
+    assert not engine._active.is_set()
+
+
+def test_start_refused_while_busy():
+    # Regression: a new dictation must never reset _committed/_typed_text while
+    # the previous worker is still finalizing.
+    transcriber = FakeTranscriber(["x"])
+    engine = make_engine(transcriber, None)
+    assert engine.start() is True
+    assert engine.start() is False
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+    assert engine.start() is True
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+
+def test_finalize_early_types_raw_then_period_diff():
+    # Hold-mode deferral leaves _typed_text empty; finalize must type the raw
+    # text immediately (verbatim, no period) and let the final diff add the
+    # period instead of waiting for the expensive pass.
+    transcriber = FakeTranscriber(["irrelevant"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+    engine._committed = ["hello", "world"]
+    engine._typed_text = ""
+
+    wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)  # 1s → short path
+    engine._finalize(wav)
+
+    assert injector.parts == ["hello world", "."]
+    assert engine.status.committed_text == "hello world."
+
+
+def test_finalize_early_type_then_cleanup_refines():
+    # The early raw type must be replaced by the cleaned final via diff_plan
+    # (delete the stale tail, type the cleaned text).
+    transcriber = FakeTranscriber(["irrelevant"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+
+    class FakeCleaner:
+        def clean(self, raw: str, app_hint: str | None = None) -> str:
+            return "hello world, everyone here."
+
+    engine._cleaner = FakeCleaner()
+    engine._committed = ["um", "hello", "world"]
+    engine._typed_text = ""
+
+    wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._finalize(wav)
+
+    assert injector.parts[0] == "um hello world"
+    assert injector.deleted == len("um hello world")
+    assert injector.parts[-1] == "hello world, everyone here."
+
+
+# ------------------------------------------------------- hold-mode deferral belt
+
+
+def test_start_sets_hold_active_in_hold_mode():
+    # Belt: in hold mode the engine defers live slice typing for the whole
+    # recording even if the controller's set_hold_active(True) lands late.
+    engine = make_engine(FakeTranscriber(["x"]))
+    engine._config.mode = "hold"
+    engine.start()
+    assert engine._hold_active is True
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+
+def test_start_clears_hold_active_in_tap_mode():
+    # Tap mode records into live typing, so the belt must NOT defer.
+    engine = make_engine(FakeTranscriber(["x"]))
+    engine._config.mode = "tap"
+    engine.start()
+    assert engine._hold_active is False
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+
+def test_hold_mode_post_release_slice_is_deferred_not_live_typed():
+    # Bug regression: the tail slice transcribed right AFTER the release used
+    # to be typed live, and its _typed_text = committed_text update claimed the
+    # ENTIRE committed text was on screen when only the tail was typed. The
+    # early-type then typed nothing (raw.startswith(typed)) and the final diff
+    # skipped (to_delete > session ledger), so most of the dictation never got
+    # typed and the screen did not match the corrected text. Hold mode must
+    # defer every slice — even post-release — and let the finalize early-type
+    # type the full text, bounded by the ledger.
+    transcriber = FakeTranscriber(["hello world this is", "this is a test"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+    engine._config.mode = "hold"
+
+    engine.start()                    # belt sets _hold_active True
+    engine._full_audio = _to_wav(np.zeros(16000 * 5, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+
+    engine.set_hold_active(False)     # release; the next slice arrives post-release
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+
+    assert injector.parts == []       # nothing typed live, even after release
+    assert engine._typed_text == ""   # bookkeeping never claims committed text
+
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert injector.parts == ["hello world this is a test", "."]
+
+
+def test_tap_mode_typed_text_tracks_actual_screen_text():
+    # Bookkeeping regression: _typed_text must equal the literal text injected
+    # (each appended slice), never the whole committed text. Deferred content
+    # may be in committed but absent from the screen, and the final diff only
+    # ever deletes what this session actually typed.
+    transcriber = FakeTranscriber(["hello world", "world this is streaming"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+    engine._config.mode = "tap"
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert injector.parts == ["hello world", " this is streaming"]
+    assert engine._typed_text == "hello world this is streaming"
+    assert engine._typed_chars == len("hello world this is streaming")
+
+
+# ------------------------------------------------------------- echo tightening
+
+
+def test_scattered_word_reuse_is_not_dropped_as_echo():
+    # Bug regression: the old subsequence check matched scattered words, so
+    # real speech that merely reused committed words in a new order was
+    # dropped. Only a CONTIGUOUS repeat of the tail is an echo.
+    engine = make_engine(FakeTranscriber(["dog the fox jumps"]), None)
+    engine._committed = ["the", "quick", "brown", "fox", "jumps",
+                         "over", "the", "lazy", "dog"]
+    engine._typed_text = "the quick brown fox jumps over the lazy dog"
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    # "dog the fox jumps" re-uses committed words but is not contiguous in the
+    # tail — it is real speech and must be kept, not dropped as an echo.
+    assert engine._committed == ["the", "quick", "brown", "fox", "jumps",
+                                 "over", "the", "lazy", "dog",
+                                 "the", "fox", "jumps"]
+
+
+def test_real_speech_matching_short_prompt_is_not_dropped_as_echo():
+    # Bug regression: the full-prompt ratio check flagged a slice that closely
+    # matched a SHORT prompt (few hint/glossary/committed words). A long-enough
+    # prompt requirement keeps genuine dictation of glossary topics.
+    engine = make_engine(FakeTranscriber(["testing the report is due again"]),
+                         None)
+    engine._committed = ["testing", "the", "report", "is", "due"]
+    engine._typed_text = "testing the report is due"
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert " ".join(engine._committed) == "testing the report is due again"
+
+
+# ------------------------------------------------------- safe final correction
+
+
+def test_finalize_never_deletes_more_than_session_typed():
+    # Bug regression: bookkeeping claimed text "on screen" that this dictation
+    # never actually typed (live slice text went out as Ctrl+Win shortcuts).
+    # The old final diff backspaced it all, eating the PREVIOUS dictation's
+    # text. The ledger bounds the correction to what this session injected.
+    transcriber = FakeTranscriber(["irrelevant"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+
+    class FakeCleaner:
+        def clean(self, raw: str, app_hint: str | None = None) -> str:
+            return "the real cleaned final text."
+
+    engine._cleaner = FakeCleaner()
+    engine._committed = ["hello", "world"]
+    engine._typed_text = "hello world"     # engine *thinks* it's on screen
+    engine._typed_chars = 0                # but nothing was actually typed
+
+    wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    engine._finalize(wav)
+
+    assert injector.deleted == 0           # the previous text is untouched
+    assert injector.parts == []            # no correction typed anywhere
+
+
+def _scenario_broken_ledger():
+    transcriber = FakeTranscriber(["irrelevant"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+
+    class FakeCleaner:
+        def clean(self, raw: str, app_hint: str | None = None) -> str:
+            return "cleaned final text."
+
+    engine._cleaner = FakeCleaner()
+    engine._committed = ["um", "hello"]
+    engine._typed_text = ""
+    wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
+    return engine, injector, wav
+
+
+def test_correction_skipped_when_foreground_window_changes(monkeypatch):
+    from src import inject as inject_mod
+    snapshots = iter([
+        {"hwnd": 100, "caret": (500, 100)},
+        {"hwnd": 200, "caret": (500, 100)},   # focus moved to another window
+    ])
+    monkeypatch.setattr(inject_mod, "capture_typing_context",
+                        lambda: next(snapshots))
+
+    engine, injector, wav = _scenario_broken_ledger()
+    engine._finalize(wav)
+
+    assert injector.parts == ["um hello"]   # early-type still typed the raw
+    assert injector.deleted == 0            # but the correction was skipped
+
+
+def test_correction_skipped_when_caret_moves(monkeypatch):
+    from src import inject as inject_mod
+    snapshots = iter([
+        {"hwnd": 100, "caret": (500, 100)},
+        {"hwnd": 100, "caret": (30, 100)},    # user clicked elsewhere / Home
+    ])
+    monkeypatch.setattr(inject_mod, "capture_typing_context",
+                        lambda: next(snapshots))
+
+    engine, injector, wav = _scenario_broken_ledger()
+    engine._finalize(wav)
+
+    assert injector.parts == ["um hello"]   # early-type still typed the raw
+    assert injector.deleted == 0            # but the correction was skipped
