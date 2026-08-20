@@ -46,6 +46,9 @@ CORRECTING_PROMPT = (
     "keep the original word exactly.\n"
     "- Fix only obvious grammar errors, missing punctuation, and filler word "
     "removal. Do NOT rewrite or rephrase sentences.\n"
+    "- If the speaker corrects themselves mid-sentence (e.g. 'no, actually', "
+    "'wait,', 'I mean', 'make that', 'scratch that'), output ONLY the final "
+    "corrected version and drop the superseded part that the speaker rejected.\n"
     "- CRITICAL: When in doubt, ALWAYS keep the original word unchanged. "
     "It is far better to leave a slightly wrong word than to replace it "
     "with something the speaker never said.\n"
@@ -104,6 +107,20 @@ def _correction_map_line(corrections: dict[str, str]) -> str:
     return _CORRECTION_MAP_RULE + "; ".join(pairs) + ".\n"
 
 
+_APP_TONE_RULE = (
+    "The user is dictating into the application: \"{title}\". Match the "
+    "expected tone and format for that kind of app (e.g. formal for a document "
+    "or email editor, conversational for a chat window, plain for a code "
+    "editor) WITHOUT changing any of the spoken content.\n"
+)
+
+
+def _app_tone_line(title: str) -> str:
+    if not title or not title.strip():
+        return ""
+    return _APP_TONE_RULE.format(title=title.strip().replace('"', "'"))
+
+
 class CleanupClient:
     def __init__(self, api_key: str, model: str = "openai/gpt-oss-20b",
                  mode: str = "correcting", glossary: list[str] | None = None,
@@ -130,13 +147,14 @@ class CleanupClient:
             base = CORRECTING_PROMPT
         return base + _glossary_line(self.glossary) + _correction_map_line(self.correction_map)
 
-    def clean(self, transcript: str) -> str:
+    def clean(self, transcript: str, app_hint: str | None = None) -> str:
         if not transcript.strip():
             return transcript
+        hint = _app_tone_line(app_hint) if app_hint else ""
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self.system_prompt + hint},
                 {"role": "user", "content": transcript},
             ],
             temperature=0.2,

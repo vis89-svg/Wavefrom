@@ -40,6 +40,9 @@
   },
   "verify": true,
   "verify_model": null,
-  "version": 2,
+  "slice_secs": 3.0,
+  "overlay": true,
+  "app_tone": true,
+  "version": 3,
   "groq_api_key": ""
 }

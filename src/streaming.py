@@ -7,6 +7,7 @@ types only the new tail — giving the "text appears as you speak" feel.
 """
 from __future__ import annotations
 
+import difflib
 import io
 import logging
 import queue
@@ -26,7 +27,7 @@ from src.merge import (PUNCT, _is_subsequence, _norm, apply_disputes,
 
 log = logging.getLogger(__name__)
 
-SLICE_SECS = 4.0
+SLICE_SECS = 3.0
 OVERLAP_SECS = 0.8
 SILENCE_PERIOD_SECS = 1.5
 MAX_SILENCE_SECS = 3.0
@@ -35,6 +36,9 @@ MAX_PROMPT_CHARS = 400
 FINAL_CHUNK_SECS = 30.0
 FINAL_CHUNK_OVERLAP_SECS = 2.0
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
+_ECHO_TAIL_WORDS = 15  # how many committed words a prompt echo may repeat
+_FULL_PROMPT_ECHO_RATIO = 0.85  # slice ~identical to the whole prompt = echo
+_LEVEL_REPORT_EVERY = 0.1  # seconds between overlay level updates
 
 
 def _low_conf_words(result) -> set[str]:
@@ -62,7 +66,7 @@ class EngineStatus:
 
 class DictationEngine:
     def __init__(self, config, transcriber, cleaner=None, injector=None,
-                 notify=None, tray=None, local_engine=None):
+                 notify=None, tray=None, local_engine=None, overlay=None):
         self._config = config
         self._transcriber = transcriber
         self._cleaner = cleaner
@@ -70,6 +74,7 @@ class DictationEngine:
         self._notify = notify
         self._tray = tray
         self._local = local_engine
+        self._overlay = overlay
 
         self._slice_q: queue.Queue[bytes | None] = queue.Queue()
         self._committed: list[str] = []
@@ -82,6 +87,7 @@ class DictationEngine:
         self._status = EngineStatus()
         self._lock = threading.Lock()
         self._pending_period = False
+        self._last_level_report = 0.0
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -122,8 +128,9 @@ class DictationEngine:
         buffer: list[np.ndarray] = []
         all_frames: list[np.ndarray] = []
         n_buffer = 0
-        slice_len = int(rate * SLICE_SECS)
-        hold_len = int(rate * (SLICE_SECS + OVERLAP_SECS))
+        slice_secs = float(getattr(self._config, "slice_secs", SLICE_SECS) or SLICE_SECS)
+        slice_len = int(rate * slice_secs)
+        hold_len = int(rate * (slice_secs + OVERLAP_SECS))
         silence_run = 0
         total = 0
         had_speech = False
@@ -131,6 +138,7 @@ class DictationEngine:
 
         with sd.InputStream(samplerate=rate, channels=1, dtype="int16",
                             blocksize=chunk) as stream:
+            self._overlay_state("recording")
             while not self._stop_capture.is_set() and self._active.is_set():
                 data, _ = stream.read(chunk)
                 buffer.append(data.copy())
@@ -144,6 +152,7 @@ class DictationEngine:
                 else:
                     silence_run = 0
                     had_speech = True
+                self._report_level(data)
 
                 if had_speech and silence_run > int(rate * SILENCE_PERIOD_SECS) \
                         and not self._pending_period:
@@ -173,6 +182,7 @@ class DictationEngine:
             self._full_audio = None
         self._slice_q.put(None)
         self._active.clear()
+        self._overlay_state("idle")
 
     # ------------------------------------------------------------ worker loop
     def _worker_loop(self) -> None:
@@ -225,8 +235,9 @@ class DictationEngine:
         with self._lock:
             # A transcript that is only words we already sent as the Whisper
             # prompt is the model echoing the prompt back, not new speech.
-            if text.strip() and _is_subsequence(tokenize(text),
-                                                tokenize(prompt or "")):
+            # Real speech that merely matches glossary/hint words is NOT an
+            # echo — the user legitimately says those words.
+            if text.strip() and self._is_prompt_echo(text, prompt):
                 log.debug("Slice is a prompt echo; ignoring: %r", text)
             else:
                 old_committed = self._committed
@@ -239,8 +250,7 @@ class DictationEngine:
                 # back after the overlap match ("real words" + prompt echo).
                 # Anything past the overlap was already covered by committed,
                 # so dropping an all-echo tail loses no new speech.
-                if appended.strip() and _is_subsequence(
-                        tokenize(appended), tokenize(prompt or "")):
+                if appended.strip() and self._is_prompt_echo(appended, prompt):
                     log.debug("Slice tail is a prompt echo; dropping: %r",
                               appended)
                     committed = old_committed
@@ -250,22 +260,98 @@ class DictationEngine:
                     self._committed = ensure_period(self._committed)
                     self._pending_period = False
                     appended = (appended + " " if appended else "") + "."
-                self._typed_text = " ".join(self._committed)
+            committed_text = " ".join(self._committed)
         if self._injector and appended:
             if modifiers_down():
                 # The user is still holding the hotkey modifiers. Typing now
                 # would reach the focused app as Ctrl+Win+<char> (or Ctrl+S
                 # style shortcuts once one modifier is released). The text is
                 # committed and gets retyped at finalize via diff_plan, so it
-                # is safe to skip.
+                # is safe to skip. _typed_text stays put so the final diff
+                # knows what is really on screen and types the missing tail.
                 log.debug("Modifiers held; deferring partial typing")
             else:
                 sep = "" if (not self._typed_text or self._typed_text.endswith(" ")
                              or appended.startswith(" ")) else " "
                 self._injector.inject_text(sep + appended)
-        self._status.committed_text = self._typed_text
+                self._typed_text = committed_text
+        elif not self._injector:
+            # No injection target (offline/eval): keep the bookkeeping text
+            # aligned with committed so status/finalize stay consistent.
+            self._typed_text = committed_text
+        self._status.committed_text = committed_text
         self._status.state = "recording" if self._active.is_set() else "idle"
+        self._overlay_state(self._status.state, committed_text)
         self._notify_tray()
+
+    def _is_prompt_echo(self, text: str, prompt: str | None) -> bool:
+        """True when `text` is Whisper echoing prompt content back, not speech.
+
+        Two signals:
+          1. The text is a subsequence of the last committed words — Whisper
+             repeats the context it was just given (overlap/silence re-decode).
+          2. The text is (almost) identical to the whole prompt (domain hint +
+             glossary + committed tail) — silence-induced regurgitation.
+        Glossary/hint words by themselves are never an echo: the user speaks
+        them for real, so matching them must not drop dictation.
+        """
+        tokens = tokenize(text)
+        if not tokens:
+            return True
+        tail = tokenize(" ".join(self._committed[-_ECHO_TAIL_WORDS:]))
+        if _is_subsequence(tokens, tail):
+            return True
+        if prompt:
+            p = tokenize(prompt)
+            if (len(tokens) >= 5 and
+                    difflib.SequenceMatcher(None, tokens, p).ratio()
+                    >= _FULL_PROMPT_ECHO_RATIO):
+                return True
+        return False
+
+    # -------------------------------------------------------------- overlay
+    def set_overlay(self, overlay) -> None:
+        self._overlay = overlay
+
+    def _overlay_state(self, state: str, text: str = "") -> None:
+        if not self._overlay:
+            return
+        try:
+            self._overlay.set_state(state, text)
+        except Exception as e:
+            log.debug("Overlay update failed: %s", e)
+
+    def _report_level(self, data: np.ndarray) -> None:
+        """Throttled mic-level feed for the overlay waveform."""
+        if not self._overlay:
+            return
+        now = time.monotonic()
+        if now - self._last_level_report < _LEVEL_REPORT_EVERY:
+            return
+        self._last_level_report = now
+        rms = np.sqrt(np.mean(np.square(data.astype(np.float32) / 32768.0)))
+        db = 20.0 * np.log10(max(rms, 1e-8))
+        try:
+            self._overlay.set_level(float(max(db, -70.0)))
+        except Exception as e:
+            log.debug("Overlay level update failed: %s", e)
+
+    def _app_hint(self) -> str | None:
+        """Foreground window title for the cleanup tone hint ("" = no hint)."""
+        if not getattr(self._config, "app_tone", True):
+            return ""
+        try:
+            from src.inject import foreground_window_title
+            title = foreground_window_title().strip()
+        except Exception as e:
+            log.debug("Could not read foreground window title: %s", e)
+            return ""
+        if not title or len(title) > 60:
+            return ""
+        lowered = title.lower()
+        if any(tok in lowered for tok in ("dictat", "settings", "voiceflow")):
+            return ""
+        return title
 
     def _finalize(self, wav_bytes: bytes | None) -> None:
         with self._lock:
@@ -280,6 +366,7 @@ class DictationEngine:
             audio_secs = len(pcm) / rate if rate else 0
             if audio_secs >= 12.0:
                 self._status.state = "transcribing"
+                self._overlay_state("transcribing", self._status.committed_text)
                 self._notify_tray()
                 try:
                     full_text, primary_low = self._transcribe_full_audio(wav_bytes)
@@ -315,9 +402,10 @@ class DictationEngine:
 
         if self._cleaner:
             self._status.state = "cleaning"
+            self._overlay_state("cleaning", self._status.committed_text)
             self._notify_tray()
             try:
-                final = self._cleaner.clean(final)
+                final = self._cleaner.clean(final, app_hint=self._app_hint())
             except Exception as e:
                 log.warning("Cleanup failed, using raw transcript: %s", e)
 
@@ -335,6 +423,7 @@ class DictationEngine:
 
         self._status.state = "idle"
         self._status.committed_text = final
+        self._overlay_state("done", final)
         self._notify_tray()
         log.info("Dictation finalized: %r", final)
 

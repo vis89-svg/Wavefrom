@@ -1,9 +1,11 @@
 """Tests for the streaming engine with mocked transcriber + injector."""
 import io
+import math
 import wave
 
 import numpy as np
 
+import src.streaming as streaming
 from src.config import Config
 from src.streaming import (DictationEngine, _is_silent, _to_wav, pcm_from_wav,
                            slice_audio)
@@ -131,7 +133,7 @@ def test_finalize_cleanup_replaces_text():
     engine = make_engine(transcriber, injector)
 
     class FakeCleaner:
-        def clean(self, raw: str) -> str:
+        def clean(self, raw: str, app_hint: str | None = None) -> str:
             return "hello world, everyone here."
 
     engine._cleaner = FakeCleaner()
@@ -322,15 +324,16 @@ def test_slice_audio_matches_capture_windows():
     rate = 16000
     pcm = np.zeros(int(rate * 7.0), dtype=np.int16)
     slices = slice_audio(pcm, rate)
-    assert len(slices) == 2
+    n_expected = math.ceil(7.0 / streaming.SLICE_SECS)
+    assert len(slices) == n_expected
     sizes = []
     for s in slices:
         with wave.open(io.BytesIO(s), "rb") as w:
             sizes.append(w.getnframes())
     # first window is SLICE_SECS (no backlog yet); later windows are capped at
     # SLICE_SECS + OVERLAP_SECS of retained audio.
-    assert sizes[0] == int(rate * 4.0)
-    assert sizes[1] == int(rate * 4.8)
+    assert sizes[0] == int(rate * streaming.SLICE_SECS)
+    assert sizes[1] == int(rate * (streaming.SLICE_SECS + streaming.OVERLAP_SECS))
 
 
 def test_pcm_from_wav_roundtrip():
@@ -421,7 +424,7 @@ class FakeCleaner:
         self.choices = choices or {}
         self.reconciled = None
 
-    def clean(self, raw):
+    def clean(self, raw, app_hint: str | None = None):
         return raw
 
     def reconcile(self, disputes):
@@ -640,3 +643,55 @@ def test_final_collapses_adjacent_loop():
     engine._worker.join(timeout=5)
 
     assert engine.status.committed_text == "the end is near."
+
+
+def test_modifiers_held_defer_partials_then_final_diff_types_missing_tail(monkeypatch):
+    # Bug 1 regression: in hold mode the user holds Ctrl+Win for the WHOLE
+    # dictation, so every partial is deferred. _typed_text must reflect only
+    # what was actually typed; the final diff must type everything missing.
+    # (Old code updated _typed_text even when typing was skipped, so the final
+    # diff saw no difference and the dictation was lost entirely.)
+    transcriber = FakeTranscriber(["hello world", "this is dictation"])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+
+    monkeypatch.setattr(streaming, "modifiers_down", lambda: True)
+    engine.start()
+    # Short audio (<12s) keeps the finalize on the streaming transcript.
+    engine._full_audio = _to_wav(np.zeros(16000 * 5, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+
+    assert injector.parts == []            # nothing typed while modifiers held
+    assert engine._typed_text == ""        # bookkeeping matches reality
+
+    # Modifiers released at finalize: the diff must type the whole text.
+    monkeypatch.setattr(streaming, "modifiers_down", lambda: False)
+    monkeypatch.setattr(streaming, "wait_for_modifiers_up", lambda *a, **k: True)
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert "hello world this is dictation" in injector.typed
+    assert injector.typed.endswith(".")
+
+
+def test_glossary_words_in_speech_are_not_dropped_as_echo():
+    # Bug 2 regression: real speech made of glossary terms must NOT be flagged
+    # as a "prompt echo". The old guard matched against the WHOLE prompt (hint
+    # + glossary + committed tail), silently dropping genuine dictation like
+    # "superintendent intimated institution" or "regular feed".
+    config = make_config()
+    config.glossary = ["superintendent", "intimated", "institution"]
+    config.domain_hint = "superintendent intimated institution"
+    injector = FakeInjector()
+    engine = make_engine(
+        FakeTranscriber(["superintendent intimated institution"]), injector)
+    engine._config = config
+    engine._committed = ["the", "meeting", "is", "at", "ten"]
+    engine._typed_text = "the meeting is at ten"
+
+    engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
+
+    assert engine._committed == ["the", "meeting", "is", "at", "ten",
+                                 "superintendent", "intimated", "institution"]
+    assert "superintendent intimated institution" in injector.typed

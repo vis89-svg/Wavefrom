@@ -61,7 +61,10 @@ class Settings:
     correction_map: dict[str, str] = field(default_factory=dict)  # wrong -> correct mappings
     verify: bool = True       # cross-check final pass with a second model
     verify_model: str | None = None  # None = pick the other large Whisper model
-    version: int = 2
+    slice_secs: float = 3.0   # capture window; lower = snappier (more API calls)
+    overlay: bool = True      # floating live indicator (waveform + text preview)
+    app_tone: bool = True     # pass the foreground window title to cleanup
+    version: int = 3
     groq_api_key: str = ""
 
     @property

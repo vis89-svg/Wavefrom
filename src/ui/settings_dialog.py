@@ -58,6 +58,9 @@ def show_settings_dialog(settings, on_save=None) -> bool:
     glossary_var = tk.StringVar(value=", ".join(settings.glossary))
     cleanup_var = tk.BooleanVar(value=bool(settings.cleanup_model))
     autostart_var = tk.BooleanVar(value=settings.autostart)
+    overlay_var = tk.BooleanVar(value=bool(getattr(settings, "overlay", True)))
+    app_tone_var = tk.BooleanVar(value=bool(getattr(settings, "app_tone", True)))
+    slice_var = tk.StringVar(value=str(getattr(settings, "slice_secs", 3.0)))
     key_var = tk.StringVar(value=get_api_key())
     key_shown = tk.BooleanVar(value=False)
 
@@ -90,6 +93,18 @@ def show_settings_dialog(settings, on_save=None) -> bool:
 
     cleanup_chk = ttk.Checkbutton(frm, variable=cleanup_var)
     field(row, "AI cleanup (removes um's, fixes punctuation)", cleanup_chk)
+    row += 1
+
+    overlay_chk = ttk.Checkbutton(frm, variable=overlay_var)
+    field(row, "Live indicator (waveform near cursor)", overlay_chk)
+    row += 1
+
+    tone_chk = ttk.Checkbutton(frm, variable=app_tone_var)
+    field(row, "Match tone of the app being typed into", tone_chk)
+    row += 1
+
+    field(row, "Slice length (seconds, 2-6; lower = snappier)",
+          ttk.Entry(frm, textvariable=slice_var, width=30))
     row += 1
 
     key_entry = ttk.Entry(frm, textvariable=key_var, width=30, show="*")
@@ -126,6 +141,13 @@ def show_settings_dialog(settings, on_save=None) -> bool:
             except Exception as e:
                 messagebox.showerror("Settings", f"Could not save API key: {e}")
                 return
+        try:
+            slice_secs = float(slice_var.get().strip())
+            if not 2.0 <= slice_secs <= 6.0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Settings", "Slice length must be a number from 2 to 6.")
+            return
         updated = type(settings)(**{
             **asdict(settings),
             "hotkey": hotkey,
@@ -133,6 +155,9 @@ def show_settings_dialog(settings, on_save=None) -> bool:
             "language": lang_var.get().strip() or None,
             "cleanup_model": "llama-3.3-70b-versatile" if cleanup_var.get() else None,
             "autostart": autostart_var.get(),
+            "overlay": overlay_var.get(),
+            "app_tone": app_tone_var.get(),
+            "slice_secs": slice_secs,
             "glossary": [t.strip() for t in glossary_var.get().split(",") if t.strip()],
         })
         save_settings(updated)

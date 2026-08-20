@@ -95,6 +95,25 @@ def wait_for_modifiers_up(timeout: float = RELEASE_TIMEOUT_SECS) -> bool:
     return True
 
 
+def foreground_window_title() -> str:
+    """Title of the currently focused window ("" if none / on failure).
+
+    Used to hint the cleanup LLM about the target app's expected tone (e.g.
+    dictating into a formal document editor vs a chat window).
+    """
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        length = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value or ""
+    except Exception as e:
+        log.debug("foreground_window_title failed: %s", e)
+        return ""
+
+
 def _type_char(ch: str) -> None:
     for state in (False, True):
         inp = _INPUT(

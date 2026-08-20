@@ -236,9 +236,16 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         return 1
     log.info("Pipeline ready; building engine...")
 
+    overlay = None
+    if settings.overlay:
+        from src.ui.overlay import OverlayWindow
+        overlay = OverlayWindow()
+        overlay.start()
+
     engine = DictationEngine(
         settings, transcriber, cleaner=cleaner, injector=injector,
         notify=toast_win if settings.toasts else None,
+        overlay=overlay,
     )
     running = {"v": True}
     tray = None
@@ -318,6 +325,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         engine.stop()
         if tray:
             tray.stop()
+        if overlay:
+            overlay.stop()
     log.info("Exited.")
     return 0
 
