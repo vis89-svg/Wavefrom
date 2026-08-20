@@ -58,6 +58,9 @@ def show_settings_dialog(settings, on_save=None) -> bool:
     glossary_var = tk.StringVar(value=", ".join(settings.glossary))
     cleanup_mode_var = tk.StringVar(
         value=settings.cleanup_mode if settings.cleanup_model else "off")
+    polish_model_var = tk.StringVar(
+        value=getattr(settings, "polish_model", "openai/gpt-oss-120b")
+        if settings.cleanup_model else "openai/gpt-oss-120b")
     autostart_var = tk.BooleanVar(value=settings.autostart)
     overlay_var = tk.BooleanVar(value=bool(getattr(settings, "overlay", True)))
     app_tone_var = tk.BooleanVar(value=bool(getattr(settings, "app_tone", True)))
@@ -100,6 +103,18 @@ def show_settings_dialog(settings, on_save=None) -> bool:
     ttk.Label(frm,
               text="off=none · correcting=grammar · conservative=verbatim\n"
                    "polish=grammar + sentence structure (Polish button in popup)").grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
+    row += 1
+
+    polish_model_box = ttk.Combobox(frm, textvariable=polish_model_var,
+                                    state="readonly",
+                                    values=("openai/gpt-oss-120b",
+                                            "openai/gpt-oss-20b",
+                                            "qwen/qwen3.6-27b"), width=28)
+    field(row, "Polish model (Polish button)", polish_model_box)
+    ttk.Label(frm,
+              text="gpt-oss-120b = strongest · gpt-oss-20b = fast\n"
+                   "qwen3.6-27b = balanced").grid(
         row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
     row += 1
 
@@ -161,10 +176,12 @@ def show_settings_dialog(settings, on_save=None) -> bool:
             "hotkey": hotkey,
             "mode": mode_var.get(),
             "language": lang_var.get().strip() or None,
-            "cleanup_model": "llama-3.3-70b-versatile"
+            "cleanup_model": "openai/gpt-oss-20b"
             if cleanup_mode_var.get() != "off" else None,
             "cleanup_mode": cleanup_mode_var.get()
             if cleanup_mode_var.get() != "off" else "correcting",
+            "polish_model": polish_model_var.get()
+            if cleanup_mode_var.get() != "off" else None,
             "autostart": autostart_var.get(),
             "overlay": overlay_var.get(),
             "app_tone": app_tone_var.get(),

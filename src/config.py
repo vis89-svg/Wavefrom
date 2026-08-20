@@ -47,7 +47,8 @@ class Settings:
     mode: str = "hold"  # hold | tap
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
-    cleanup_mode: str = "correcting"  # correcting | conservative
+    cleanup_mode: str = "correcting"  # correcting | conservative | polish
+    polish_model: str = "openai/gpt-oss-120b"  # stronger model for the Polish button
     language: str | None = "en"  # forced decode language (None = auto-detect)
     sample_rate: int = DEFAULT_SAMPLE_RATE
     toasts: bool = True
@@ -222,6 +223,10 @@ def load_config() -> Settings:
     cleanup_mode = os.getenv("CLEANUP_MODE", "").strip().lower()
     if cleanup_mode in ("correcting", "conservative", "polish"):
         kwargs["cleanup_mode"] = cleanup_mode
+    # POLISH_MODEL
+    polish_model = os.getenv("POLISH_MODEL", "").strip()
+    if polish_model:
+        kwargs["polish_model"] = polish_model
     # LANGUAGE (forced decode language; "none"/empty = auto-detect)
     language_env = os.getenv("LANGUAGE", "").strip()
     if language_env:

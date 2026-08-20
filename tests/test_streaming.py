@@ -938,12 +938,14 @@ def test_correction_skipped_when_foreground_window_changes(monkeypatch):
 # ------------------------------------------------------- on-demand polish pass
 
 
-def _engine_with_polish_cleaner(injector):
+def _engine_with_polish_cleaner(injector, polish_model=None):
     transcriber = FakeTranscriber(["irrelevant"])
     engine = make_engine(transcriber, injector)
+    if polish_model is not None:
+        engine._config.polish_model = polish_model
 
     class FakeCleaner:
-        def polish(self, raw, app_hint=None):
+        def polish(self, raw, app_hint=None, model=None):
             return "hello world, everyone here."
 
     engine._cleaner = FakeCleaner()
@@ -980,6 +982,30 @@ def test_engine_polish_returns_none_without_cleaner():
     engine._status.committed_text = "hello"
     assert engine.polish() is None
     assert injector.parts == []
+
+
+def test_engine_polish_passes_configured_model(monkeypatch):
+    from src import inject as inject_mod
+    monkeypatch.setattr(inject_mod, "capture_typing_context",
+                        lambda: {"hwnd": 100, "caret": (500, 100)})
+
+    injector = FakeInjector()
+    engine = _engine_with_polish_cleaner(injector, polish_model="qwen/qwen3.6-27b")
+    seen = {}
+
+    class RecordingCleaner:
+        def polish(self, raw, app_hint=None, model=None):
+            seen["model"] = model
+            return raw
+
+    engine._cleaner = RecordingCleaner()
+    engine._committed = ["hello", "world"]
+    engine._typed_text = "hello world"
+    engine._typed_chars = len("hello world")
+    engine._status.committed_text = "hello world"
+
+    engine.polish()
+    assert seen["model"] == "qwen/qwen3.6-27b"
 
 
 def test_engine_polish_skipped_when_window_changes(monkeypatch):

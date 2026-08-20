@@ -75,8 +75,10 @@ def test_polish_prompt_has_structure_rules():
     assert "split run-on sentences" in POLISH_PROMPT
     assert "join sentence fragments" in POLISH_PROMPT
     assert "Fix grammar: subject-verb agreement" in POLISH_PROMPT
-    assert "Never change the meaning" in POLISH_PROMPT
-    assert "When in doubt" in POLISH_PROMPT
+    assert "speech-recognition" in POLISH_PROMPT
+    assert "mis-transcription" in POLISH_PROMPT
+    assert "Never leave gibberish" in POLISH_PROMPT
+    assert "NEVER invent content" in POLISH_PROMPT
 
 
 def test_polish_uses_dedicated_prompt_regardless_of_mode(monkeypatch):
@@ -95,6 +97,40 @@ def test_polish_uses_dedicated_prompt_regardless_of_mode(monkeypatch):
     out = client.polish("hello")
     assert out == "Polished text."
     assert sent["system"].startswith(POLISH_PROMPT)
+
+
+def test_polish_uses_requested_model(monkeypatch):
+    client = CleanupClient(api_key="test-key")
+    sent = {}
+
+    class FakeResponse:
+        choices = [type("C", (), {"message": type("M", (), {
+            "content": "Polished."})})()]
+
+    def capture(**kw):
+        sent["model"] = kw["model"]
+        return FakeResponse()
+
+    monkeypatch.setattr(client._client.chat.completions, "create", capture)
+    client.polish("hello", model="openai/gpt-oss-120b")
+    assert sent["model"] == "openai/gpt-oss-120b"
+
+
+def test_polish_defaults_to_client_model(monkeypatch):
+    client = CleanupClient(api_key="test-key", model="openai/gpt-oss-20b")
+    sent = {}
+
+    class FakeResponse:
+        choices = [type("C", (), {"message": type("M", (), {
+            "content": "Polished."})})()]
+
+    def capture(**kw):
+        sent["model"] = kw["model"]
+        return FakeResponse()
+
+    monkeypatch.setattr(client._client.chat.completions, "create", capture)
+    client.polish("hello")
+    assert sent["model"] == "openai/gpt-oss-20b"
 
 
 def test_polish_keeps_input_when_empty():

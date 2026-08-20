@@ -562,7 +562,9 @@ class DictationEngine:
         self._status.state = "cleaning"
         self._notify_tray()
         try:
-            polished = self._cleaner.polish(final, app_hint=self._app_hint())
+            polished = self._cleaner.polish(
+                final, app_hint=self._app_hint(),
+                model=getattr(self._config, "polish_model", None) or None)
         except Exception as e:
             log.warning("Polish pass failed, keeping cleaned text: %s", e)
             self._status.state = "idle"

@@ -131,6 +131,21 @@ def test_polish_cleanup_mode_accepted():
     assert cfg.cleanup_mode == "polish"
 
 
+def test_polish_model_defaults_to_120b():
+    cfg = Config()
+    assert cfg.polish_model == "openai/gpt-oss-120b"
+
+
+def test_load_config_reads_polish_model_env():
+    import os
+    os.environ["POLISH_MODEL"] = "openai/gpt-oss-20b"
+    try:
+        cfg = load_config()
+    finally:
+        os.environ.pop("POLISH_MODEL", None)
+    assert cfg.polish_model == "openai/gpt-oss-20b"
+
+
 def test_invalid_cleanup_mode_falls_back_to_correcting():
     import os
     os.environ["CLEANUP_MODE"] = "banana"

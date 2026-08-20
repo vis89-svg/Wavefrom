@@ -35,25 +35,37 @@ CONSERVATIVE_PROMPT = (
 )
 
 POLISH_PROMPT = (
-    _CORE
-    + "- Fix grammar: subject-verb agreement, tense, articles, prepositions, "
-    "and word order within a sentence.\n"
+    "You are a professional editor giving a speech-recognition transcript a "
+    "final Grammarly-grade polish: clean, natural, grammatically correct "
+    "prose. The text was produced by voice recognition, so it may contain "
+    "mis-heard words, repeated nonsense, and broken sentence structure that "
+    "must be fixed. Rules:\n"
+    "- Remove filler and meaningless repetition: um, uh, like, you know, so, "
+    "and repeated words or phrases that are clearly recognition echo or noise.\n"
+    "- Correct obvious mis-transcriptions: if a word or phrase makes no sense "
+    "in context, replace it with the most likely intended word based on the "
+    "surrounding text, or remove it if no sensible candidate exists. Never "
+    "leave gibberish in the output.\n"
+    "- Fix grammar: subject-verb agreement, tense, articles, prepositions, "
+    "pronouns, and word order within a sentence.\n"
     "- Fix sentence structure: split run-on sentences, join sentence fragments "
-    "into grammatical sentences, and break text into well-formed sentences.\n"
-    "- Only reorder words inside a sentence when needed for correct grammar or "
-    "natural flow. Do not reorder or rearrange sentences.\n"
-    "- Never change the meaning, facts, numbers, dates, or any content that was "
-    "spoken.\n"
-    "- NEVER change proper nouns, place names, personal names, organization "
-    "names, Indian place names, or any capitalized words unless they are "
-    "clearly a common English word that was misheard.\n"
+    "into grammatical sentences, and break the text into well-formed "
+    "sentences.\n"
+    "- Fix capitalization and punctuation throughout.\n"
+    "- Do not reorder sentences or move content around; keep the original "
+    "order and flow of ideas.\n"
+    "- NEVER change proper nouns: personal names, place names (including "
+    "Indian place names), organization names, or capitalized words unless "
+    "they are clearly a mis-transcription of a common English word.\n"
     "- Preserve glossary/technical terms and quoted phrases exactly as written.\n"
+    "- Preserve all facts, numbers, dates, prices, and measurements unless "
+    "they are clearly mis-transcribed.\n"
     "- If the speaker corrected themselves mid-sentence (e.g. 'no, actually', "
     "'wait,', 'I mean', 'make that', 'scratch that'), output ONLY the final "
     "corrected version and drop the superseded part that the speaker rejected.\n"
-    "- CRITICAL: When in doubt, ALWAYS keep the original wording unchanged. "
-    "It is far better to leave slightly imperfect grammar than to invent or "
-    "drop content the speaker never said.\n"
+    "- NEVER invent content that was not said or implied; do not add ideas, "
+    "examples, or facts. When a word is plausibly correct, keep it.\n"
+    "- Output only the polished text, nothing else.\n"
 )
 
 CORRECTING_PROMPT = (
@@ -186,17 +198,19 @@ class CleanupClient:
         )
         return response.choices[0].message.content or transcript
 
-    def polish(self, transcript: str, app_hint: str | None = None) -> str:
+    def polish(self, transcript: str, app_hint: str | None = None,
+               model: str | None = None) -> str:
         """On-demand sentence-structure + grammar polish of an already-cleaned
         transcript. Uses the dedicated POLISH_PROMPT regardless of the mode the
-        client was constructed with."""
+        client was constructed with. `model` overrides the client's model for
+        this call (used for a stronger polish model)."""
         if not transcript.strip():
             return transcript
         hint = _app_tone_line(app_hint) if app_hint else ""
         prompt = POLISH_PROMPT + _glossary_line(self.glossary) \
             + _correction_map_line(self.correction_map)
         response = self._client.chat.completions.create(
-            model=self._model,
+            model=model or self._model,
             messages=[
                 {"role": "system", "content": prompt + hint},
                 {"role": "user", "content": transcript},
