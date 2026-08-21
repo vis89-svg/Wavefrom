@@ -1045,3 +1045,51 @@ def test_correction_skipped_when_caret_moves(monkeypatch):
 
     assert injector.parts == ["um hello"]   # early-type still typed the raw
     assert injector.deleted == 0            # but the correction was skipped
+
+
+# ------------------------------------------------------- send / clipboard
+
+def test_engine_send_when_no_polish():
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["x"]), injector)
+    engine._status.committed_text = ""
+    assert engine.send() is None
+    assert injector.parts == []
+
+
+def test_engine_send_types_polished_text(monkeypatch):
+    from src import inject as inject_mod
+    monkeypatch.setattr(inject_mod, "capture_typing_context",
+                        lambda: {"hwnd": 100, "caret": (500, 100)})
+
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["irrelevant"]), injector)
+    engine._cleaner = type("Cleaner", (), {"polish": lambda self, raw, ah, m: raw})()
+    engine._status.committed_text = "hello world, everyone here."
+
+    result = engine.send()
+    assert result == "hello world, everyone here."
+    assert "hello world, everyone here." in injector.parts
+
+
+def test_engine_copy_to_clipboard_when_no_polish():
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["x"]), injector)
+    engine._cleaner = type("Cleaner", (), {"polish": lambda self, raw, ah, m: raw})()
+    engine._status.committed_text = ""
+    assert engine.copy_to_clipboard() is None
+
+
+def test_engine_copy_to_clipboard_copies_text(monkeypatch):
+    from unittest.mock import patch
+    monkeypatch.setattr("pyperclip.copy", lambda x: None)
+
+    injector = FakeInjector()
+    engine = make_engine(FakeTranscriber(["x"]), injector)
+    engine._cleaner = type("Cleaner", (), {"polish": lambda self, raw, ah, m: raw})()
+    engine._status.committed_text = "hello world, everyone here."
+
+    with patch("pyperclip.copy") as mock_copy:
+        result = engine.copy_to_clipboard()
+        assert result == "hello world, everyone here."
+        mock_copy.assert_called_once_with("hello world, everyone here.")

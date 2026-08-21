@@ -609,6 +609,44 @@ class DictationEngine:
         log.info("Polished final text: %r", polished)
         return polished
 
+    def send(self) -> str | None:
+        """Type the last polished text at the current caret position.
+
+        Unlike Polish, this bypasses the window/caret/ledger guards and simply
+        injects the polished text. Returns the text typed, or None when no
+        polished text is available.
+        """
+        if not self._cleaner:
+            log.warning("Send unavailable: cleanup is disabled")
+            return None
+        polished = self._status.committed_text
+        if not polished or not polished.strip():
+            log.info("Send: no polished text yet; run Polish first")
+            return None
+        if self._injector:
+            self._injector.inject_text(polished)
+        log.info("Send: typed polished text (%d chars)", len(polished))
+        self._status.state = "idle"
+        self._notify_tray()
+        return polished
+
+    def copy_to_clipboard(self) -> str | None:
+        """Copy the last polished text to the system clipboard.
+
+        Returns the text copied, or None when no polished text is available.
+        """
+        if not self._cleaner:
+            log.warning("Clipboard unavailable: cleanup is disabled")
+            return None
+        polished = self._status.committed_text
+        if not polished or not polished.strip():
+            log.info("Clipboard: no polished text yet")
+            return None
+        import pyperclip
+        pyperclip.copy(polished)
+        log.info("Clipboard: copied polished text (%d chars)", len(polished))
+        return polished
+
     def _wait_hold_release(self, timeout: float = 2.0) -> None:
         """Block until the hotkey is released (or a short timeout elapses).
 

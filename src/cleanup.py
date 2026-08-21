@@ -195,6 +195,7 @@ class CleanupClient:
                 {"role": "user", "content": transcript},
             ],
             temperature=0.2,
+            timeout=60,
         )
         return response.choices[0].message.content or transcript
 
@@ -216,6 +217,7 @@ class CleanupClient:
                 {"role": "user", "content": transcript},
             ],
             temperature=0.2,
+            timeout=60,
         )
         return response.choices[0].message.content or transcript
 
