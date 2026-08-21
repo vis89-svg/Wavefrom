@@ -142,6 +142,14 @@ class OverlayWindow:
         """callback() -> polished text or None. Called off the Tk thread."""
         self._polish_callback = callback
 
+    def set_send_callback(self, callback) -> None:
+        """callback() -> polished text or None. Called off the Tk thread."""
+        self._send_callback = callback
+
+    def set_clipboard_callback(self, callback) -> None:
+        """callback() -> polished text or None. Called off the Tk thread."""
+        self._clipboard_callback = callback
+
     # ------------------------------------------------------------ tk thread
     def _run(self) -> None:
         root = tk.Tk()
@@ -325,6 +333,12 @@ class OverlayWindow:
             log.info("Send: no polished text yet")
             self._state_lbl.config(text="No polished text", fg="#e5484d")
         self._send_btn.config(state="normal", text="Send")
+        # If we're in panel mode, also update the text display
+        if self._panel_shown:
+            self._txt.config(state="normal")
+            self._txt.delete("1.0", "end")
+            self._txt.insert("1.0", (text or "").strip())
+            self._txt.config(state="disabled")
 
     def _apply_clipboard_result(self, text: str | None) -> None:
         """Handle clipboard result from the queue."""
@@ -360,18 +374,17 @@ class OverlayWindow:
     def _on_send(self) -> None:
         if self._polishing:
             return
+        if self._send_callback is None:
+            self._state_lbl.config(text="Send unavailable", fg="#e5484d")
+            return
         self._polishing = True
         self._send_btn.config(state="disabled", text="Sending…")
-        if self._polish_callback is not None:
-            threading.Thread(target=self._run_send, daemon=True,
-                             name="overlay-send").start()
-        else:
-            self._send_btn.config(state="normal", text="Send")
-            self._state_lbl.config(text="Polish unavailable", fg="#e5484d")
+        threading.Thread(target=self._run_send, daemon=True,
+                         name="overlay-send").start()
 
     def _run_send(self) -> None:
         try:
-            result = self._polish_callback()
+            result = self._send_callback()
         except Exception as e:
             log.warning("Send pass failed: %s", e)
             result = None
@@ -381,17 +394,16 @@ class OverlayWindow:
     def _on_clipboard(self) -> None:
         if self._polishing:
             return
+        if self._clipboard_callback is None:
+            self._state_lbl.config(text="Clipboard unavailable", fg="#e5484d")
+            return
         self._polishing = True
-        if self._polish_callback is not None:
-            threading.Thread(target=self._run_clipboard, daemon=True,
-                             name="overlay-clipboard").start()
-        else:
-            self._polishing = False
-            self._state_lbl.config(text="Polish unavailable", fg="#e5484d")
+        threading.Thread(target=self._run_clipboard, daemon=True,
+                         name="overlay-clipboard").start()
 
     def _run_clipboard(self) -> None:
         try:
-            result = self._polish_callback()
+            result = self._clipboard_callback()
         except Exception as e:
             log.warning("Clipboard pass failed: %s", e)
             result = None

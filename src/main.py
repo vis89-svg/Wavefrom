@@ -388,6 +388,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
     )
     if overlay:
         overlay.set_polish_callback(engine.polish)
+        overlay.set_send_callback(engine.send)
+        overlay.set_clipboard_callback(engine.copy_to_clipboard)
     running = {"v": True}
     capture_state = {"on": False}
     tray = None
