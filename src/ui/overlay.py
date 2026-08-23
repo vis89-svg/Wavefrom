@@ -116,6 +116,7 @@ class OverlayWindow:
         self._levels: list[float] = [0.0] * _BAR_COUNT
         self._t0 = time.monotonic()
         self._polish_callback = None
+        self._stop_callback = None
         self._polishing = False
         self._panel_shown = False
 
@@ -150,6 +151,12 @@ class OverlayWindow:
         """callback() -> polished text or None. Called off the Tk thread."""
         self._clipboard_callback = callback
 
+    def set_stop_callback(self, callback) -> None:
+        """callback() ends the current dictation early. Called off the Tk
+        thread since engine.stop() can block briefly waiting for capture to
+        exit."""
+        self._stop_callback = callback
+
     # ------------------------------------------------------------ tk thread
     def _run(self) -> None:
         root = tk.Tk()
@@ -171,6 +178,11 @@ class OverlayWindow:
         self._state_lbl = tk.Label(head, text="Idle", font=("Segoe UI", 9, "bold"),
                                    fg="#d7dbe0", bg=frame["bg"])
         self._state_lbl.pack(side="left", padx=6)
+        self._stop_btn = tk.Button(
+            head, text="■ Stop", font=("Segoe UI", 8, "bold"),
+            bg="#e5484d", fg="white", activebackground="#ff5b60",
+            activeforeground="white", relief="flat", padx=6, pady=0,
+            command=self._on_stop)
 
         self._bars = tk.Canvas(frame, width=200, height=34, bg="#181c21",
                                highlightthickness=0)
@@ -276,15 +288,23 @@ class OverlayWindow:
         if state == "done":
             self._show_panel(text)
         else:
-            self._show_live(text)
+            self._show_live(state, text)
 
-    def _show_live(self, text: str) -> None:
-        # Live indicator mode: click-through, waveform + short preview.
+    def _show_live(self, state: str, text: str) -> None:
+        # Live indicator mode: click-through waveform + short preview, EXCEPT
+        # while actually recording, when a Stop button needs to be clickable —
+        # tap mode has no "release" gesture to end the recording otherwise.
         if self._panel_shown:
             self._panel.pack_forget()
             self._panel_shown = False
             self._preview_lbl.pack(fill="x", padx=10, pady=(2, 8))
-        self._make_click_through()
+        if state == "recording":
+            self._set_interactive(True)
+            self._stop_btn.config(state="normal", text="■ Stop")
+            self._stop_btn.pack(side="right", padx=(6, 0))
+        else:
+            self._make_click_through()
+            self._stop_btn.pack_forget()
         preview = (text or "").strip()
         if len(preview) > _PREVIEW_CHARS:
             preview = "…" + preview[-_PREVIEW_CHARS:]
@@ -411,6 +431,13 @@ class OverlayWindow:
             result = None
         if self._root:
             self._q.put(("clipboard_result", result))
+
+    def _on_stop(self) -> None:
+        if self._stop_callback is None:
+            return
+        self._stop_btn.config(state="disabled", text="Stopping…")
+        threading.Thread(target=self._stop_callback, daemon=True,
+                         name="overlay-stop").start()
 
     def _on_close(self) -> None:
         if self._root:

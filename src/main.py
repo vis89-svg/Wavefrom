@@ -395,6 +395,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         overlay.set_polish_callback(engine.polish)
         overlay.set_send_callback(engine.send)
         overlay.set_clipboard_callback(engine.copy_to_clipboard)
+        overlay.set_stop_callback(engine.stop)
     running = {"v": True}
     capture_state = {"on": False}
     tray = None
