@@ -7,6 +7,7 @@ types only the new tail — giving the "text appears as you speak" feel.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import difflib
 import io
 import logging
@@ -529,11 +530,36 @@ class DictationEngine:
                 self._overlay_state("transcribing", self._status.committed_text)
                 self._notify_tray()
                 try:
-                    full_text, primary_low = self._transcribe_full_audio(wav_bytes)
+                    if self._verify_enabled():
+                        # Primary and verify are independent decodes of the
+                        # SAME audio — running them one after another (as
+                        # before) doubles the wait for no reason. Running
+                        # them concurrently cuts that part of the lag
+                        # roughly in half without skipping either decode.
+                        with concurrent.futures.ThreadPoolExecutor(
+                                max_workers=2) as pool:
+                            primary_future = pool.submit(
+                                self._transcribe_full_audio, wav_bytes)
+                            verify_future = pool.submit(
+                                self._transcribe_full_audio, wav_bytes,
+                                model=self._verify_model(), temperature=0.4)
+                            # A primary failure is fatal to this whole pass
+                            # (same as before: propagates to the except
+                            # below, falling back to the streaming
+                            # transcript). A verify failure alone must not
+                            # discard a good primary result.
+                            full_text, primary_low = primary_future.result()
+                            try:
+                                verify_text, verify_low = verify_future.result()
+                            except Exception as e:
+                                log.warning("Verify pass failed, using primary: %s", e)
+                                verify_text, verify_low = "", set()
+                        if full_text and full_text.strip():
+                            full_text = self._reconcile(
+                                full_text, primary_low, verify_text, verify_low)
+                    else:
+                        full_text, primary_low = self._transcribe_full_audio(wav_bytes)
                     if full_text and full_text.strip():
-                        if self._verify_enabled():
-                            full_text = self._verify_and_reconcile(
-                                full_text, primary_low, wav_bytes)
                         unioned = union_text(full_text.strip(), raw)
                         if unioned != raw:
                             final = unioned
@@ -605,8 +631,13 @@ class DictationEngine:
                         self._injector.delete_chars(to_delete)
                         self._typed_chars = max(0, self._typed_chars - to_delete)
                     if to_type:
-                        self._injector.inject_text(to_type)
+                        # Paste instead of char-by-char: this is a correction
+                        # replacing text already on screen, so a multi-second
+                        # visible retype is exactly the "removes the whole
+                        # typed one" flicker — a paste makes the swap instant.
+                        self._injector.paste_text(to_type)
                         self._typed_chars += len(to_type)
+                    typed = final
                 else:
                     # The screen no longer matches the engine's bookkeeping (focus
                     # moved, caret moved, or the bookkeeping claims more text than
@@ -616,6 +647,16 @@ class DictationEngine:
                     log.warning("Correction skipped (window=%s caret=%s ledger=%s); "
                                 "on-screen text left as-is", window_ok, caret_ok,
                                 ledger_ok)
+            # `typed` now accurately reflects the actual on-screen text —
+            # whether the correction applied, was a no-op, or was skipped.
+            # Later on-demand actions (Polish/Send) must diff against this,
+            # not committed_text: committed_text may already hold the cleaned
+            # text even when the on-screen correction above was skipped, and
+            # diffing against the wrong "before" state corrupts the screen
+            # (deletes too few/wrong characters, then appends the new tail
+            # onto what's left — the polished-and-unpolished-text-mashed-
+            # together bug).
+            self._typed_text = typed
 
         self._status.state = "idle"
         self._status.committed_text = final
@@ -641,6 +682,10 @@ class DictationEngine:
         final = self._status.committed_text
         if not final or not final.strip():
             return None
+        on_screen = self._typed_text  # what's ACTUALLY on screen right now —
+                                      # committed_text may already be cleaned
+                                      # even if a prior correction never made
+                                      # it to the screen (guard skip).
         from src.inject import capture_typing_context
         baseline = capture_typing_context()
         self._status.state = "cleaning"
@@ -661,22 +706,25 @@ class DictationEngine:
         if polished.strip() != final.strip() and polished[-1] not in PUNCT:
             polished += "."
         if self._injector:
-            to_delete, to_type = diff_plan(final, polished)
+            to_delete, to_type = diff_plan(on_screen, polished)
             now = capture_typing_context()
             window_ok, caret_ok = self._context_matches(baseline, now)
             ledger_ok = True
             if to_delete > self._typed_chars:
                 ledger_ok = False
-            log.info("Polish correction: final=%d polished=%d prefix=%d "
+            log.info("Polish correction: on_screen=%d polished=%d prefix=%d "
                      "to_delete=%d to_type=%d ledger=%d window=%s caret=%s",
-                     len(final), len(polished), len(final) - to_delete,
+                     len(on_screen), len(polished), len(on_screen) - to_delete,
                      to_delete, len(to_type), self._typed_chars,
                      window_ok, caret_ok)
             if window_ok and caret_ok and ledger_ok:
                 if to_delete:
                     self._injector.delete_chars(to_delete)
+                    self._typed_chars = max(0, self._typed_chars - to_delete)
                 if to_type:
-                    self._injector.inject_text(to_type)
+                    self._injector.paste_text(to_type)
+                    self._typed_chars += len(to_type)
+                self._typed_text = polished
             else:
                 log.warning("Polish skipped (window=%s caret=%s ledger=%s); "
                             "on-screen text left as-is", window_ok, caret_ok,
@@ -702,7 +750,7 @@ class DictationEngine:
             log.info("Send: no polished text yet; run Polish first")
             return None
         if self._injector:
-            self._injector.inject_text(polished)
+            self._injector.paste_text(polished)
         log.info("Send: typed polished text (%d chars)", len(polished))
         self._status.state = "idle"
         self._notify_tray()
@@ -846,23 +894,21 @@ class DictationEngine:
             return "whisper-large-v3"
         return "whisper-large-v3-turbo"
 
-    def _verify_and_reconcile(self, full_text: str, primary_low: set[str],
-                              wav_bytes: bytes) -> str:
+    def _reconcile(self, full_text: str, primary_low: set[str],
+                   verify_text: str, verify_low: set[str]) -> str:
         """Cross-check the primary full pass against a second model decode.
 
         Where the two transcripts substitute different wording for the same
         audio, the cleanup LLM picks the wording that fits the context; the
         chosen candidate is spliced into the primary text. Any failure keeps
         the primary text (never a fabricated third option).
+
+        Takes both decodes already computed (the caller runs the primary and
+        verify transcriptions concurrently, since they're independent decodes
+        of the same audio — this method only does the comparison/adjudication
+        step, which genuinely depends on both being done).
         """
-        try:
-            verify_text, verify_low = self._transcribe_full_audio(
-                wav_bytes, model=self._verify_model(), temperature=0.4)
-        except Exception as e:
-            log.warning("Verify pass failed, using primary: %s", e)
-            self._last_disputes = []
-            return full_text
-        if not verify_text.strip():
+        if not verify_text or not verify_text.strip():
             self._last_disputes = []
             return full_text
 

@@ -1,6 +1,7 @@
 """Tests for the streaming engine with mocked transcriber + injector."""
 import io
 import math
+import threading
 import wave
 
 import numpy as np
@@ -16,11 +17,24 @@ class FakeTranscriber:
         self._map = map_by_slice
         self.calls = []
         self.kwargs = []
+        self._lock = threading.Lock()
+        self._next_idx = 0
 
     def transcribe_bytes(self, audio_bytes, **kwargs):
-        self.calls.append(len(audio_bytes))
-        self.kwargs.append(kwargs)
-        idx = len(self.calls) - 1
+        # The engine now runs the primary and verify full-audio passes
+        # concurrently, so this must be safe to call from two threads at
+        # once. Verify calls always pass an explicit `model=` override
+        # (primary/slice calls never do) — routing them to the last map
+        # entry, rather than "whichever call happens to arrive first gets
+        # the next index", keeps which canned response is primary vs.
+        # verify deterministic regardless of thread scheduling.
+        with self._lock:
+            self.calls.append(len(audio_bytes))
+            self.kwargs.append(kwargs)
+            if "model" in kwargs:
+                return self._map[-1]
+            idx = self._next_idx
+            self._next_idx += 1
         return self._map[min(idx, len(self._map) - 1)]
 
 
@@ -30,6 +44,9 @@ class FakeInjector:
         self.deleted = 0
 
     def inject_text(self, text):
+        self.parts.append(text)
+
+    def paste_text(self, text):
         self.parts.append(text)
 
     def delete_chars(self, n):
@@ -491,11 +508,14 @@ def test_verify_pass_reconciles_substitution():
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
-    # 3 transcribe calls: slice + primary chunk + verify chunk
+    # 3 transcribe calls: slice + primary chunk + verify chunk. Primary and
+    # verify now run concurrently, so find the verify call by its distinct
+    # model/temperature rather than assuming a fixed arrival index.
     assert len(transcriber.calls) == 3
-    # verify chunk used the alternate model at higher temperature
-    assert transcriber.kwargs[2]["model"] == "whisper-large-v3"
-    assert transcriber.kwargs[2]["temperature"] == 0.4
+    verify_calls = [kw for kw in transcriber.kwargs
+                    if kw.get("model") == "whisper-large-v3"]
+    assert len(verify_calls) == 1
+    assert verify_calls[0]["temperature"] == 0.4
     assert len(engine._last_disputes) == 1
     # reconciled: verify wording chosen, hallucinated "four web apps" gone
     assert "whole app is gone" in engine.status.committed_text

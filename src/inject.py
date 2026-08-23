@@ -18,6 +18,10 @@ VK_BACK = 0x08
 
 CHAR_DELAY_SECS = 0.015  # keep apps from dropping keystrokes
 BACKSPACE_DELAY_SECS = 0.008
+PASTE_SETTLE_SECS = 0.05  # let the target app process Ctrl+V before restoring
+                          # the clipboard, or the paste can grab the old value
+VK_CONTROL = 0x11
+VK_V = 0x56
 
 # Virtual key codes for the modifier keys. Apps read the *physical* modifier
 # state (GetKeyState/GetAsyncKeyState) even for SendInput UNICODE characters,
@@ -207,11 +211,52 @@ def inject_text(text: str) -> None:
             _type_char(ch)
 
 
+def paste_text(text: str) -> None:
+    """Insert `text` at the caret via clipboard paste (Ctrl+V).
+
+    Used for corrections/replacements (finalize's post-cleanup swap, Polish,
+    Send) instead of character-by-character SendInput: a 300-character
+    correction takes ~15ms/char (~4.5s) to visibly retype but is effectively
+    instant as a single paste. Falls back to inject_text() if pyperclip or the
+    clipboard round-trip is unavailable. The clipboard's previous contents
+    (if any, and if textual) are restored afterward.
+    """
+    if not text:
+        return
+    try:
+        import pyperclip
+    except ImportError:
+        inject_text(text)
+        return
+    try:
+        previous = pyperclip.paste()
+    except Exception:
+        previous = None
+    try:
+        pyperclip.copy(text)
+    except Exception:
+        inject_text(text)
+        return
+    _send_key(VK_CONTROL, False)
+    _send_key(VK_V, False)
+    _send_key(VK_V, True)
+    _send_key(VK_CONTROL, True)
+    time.sleep(PASTE_SETTLE_SECS)
+    if previous is not None:
+        try:
+            pyperclip.copy(previous)
+        except Exception:
+            pass
+
+
 class TextInjector:
     """Object-style facade so the engine can treat typing as one unit."""
 
     def inject_text(self, text: str) -> None:
         inject_text(text)
+
+    def paste_text(self, text: str) -> None:
+        paste_text(text)
 
     def delete_chars(self, n: int) -> None:
         delete_chars(n)
