@@ -16,14 +16,14 @@ import sys
 import threading
 import time
 import traceback
+from dataclasses import fields
 from pathlib import Path
 
 import keyboard
 
 from src.cleanup import CleanupClient
 from src.config import (ENV_PATH, LOGS_DIR, Settings, autostart_enabled, autostart_set,
-                        get_api_key, load_settings, save_settings, update_settings,
-                        validate)
+                        get_api_key, load_settings, validate)
 from src.inject import TextInjector
 from src.local_engine import LocalWhisperEngine
 from src.notify import toast as toast_win
@@ -186,6 +186,7 @@ class HotkeyController:
         self._emitted = False
         self._last_release = 0.0
         self._hook = None
+        self._hook_mode: str | None = None
         self._watch_evt = threading.Event()
         self._watch_thread: threading.Thread | None = None
         self._register()
@@ -341,6 +342,7 @@ class HotkeyController:
             self._hook = keyboard.hook(self._callback, suppress=True)
         else:
             self._hook = keyboard.add_hotkey(self._hotkey, self._on_press, suppress=True)
+        self._hook_mode = self._mode
 
     def _unregister(self) -> None:
         self._watch_evt.set()
@@ -348,20 +350,23 @@ class HotkeyController:
             self._watch_thread.join(timeout=1)
         if self._hook is not None:
             try:
-                if self._mode == "hold":
+                # Tear down using the mode that actually created this hook,
+                # not self._mode — set_mode() already updated self._mode to
+                # the NEW mode before calling here, so using it would call
+                # unhook() on an add_hotkey() handle (or vice versa), which
+                # raises KeyError and leaves the old registration active
+                # internally in the `keyboard` library, alongside the new one.
+                if self._hook_mode == "hold":
                     keyboard.unhook(self._hook)
                 else:
                     keyboard.remove_hotkey(self._hook)
             except Exception:
                 pass
             self._hook = None
+            self._hook_mode = None
 
     def set_hotkey(self, hotkey: str) -> None:
         self._hotkey = hotkey
-        self._register()
-
-    def set_mode(self, mode: str) -> None:
-        self._mode = mode
         self._register()
 
     def stop(self) -> None:
@@ -393,7 +398,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
     running = {"v": True}
     capture_state = {"on": False}
     tray = None
-    current_settings = {"hotkey": settings.hotkey, "mode": settings.mode}
+    current_settings = {"hotkey": settings.hotkey, "live_hotkey": settings.live_hotkey}
 
     def on_quit() -> None:
         running["v"] = False
@@ -404,18 +409,19 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
 
     def on_settings_saved(new_settings: Settings) -> None:
         current_settings["hotkey"] = new_settings.hotkey
-        current_settings["mode"] = new_settings.mode
-        hotkeys.set_hotkey(new_settings.hotkey)
-        hotkeys.set_mode(new_settings.mode)
+        current_settings["live_hotkey"] = new_settings.live_hotkey
+        hold_hotkey.set_hotkey(new_settings.hotkey)
+        live_hotkey.set_hotkey(new_settings.live_hotkey)
         engine.set_cleaner_mode(bool(new_settings.cleanup_model))
+        # engine._config IS this `settings` object — without copying every
+        # field over, the running engine keeps deciding things (verify,
+        # domain_hint, ...) from stale values until the app is restarted, even
+        # though the hotkey controllers and settings.json already moved on.
+        for f in fields(Settings):
+            setattr(settings, f.name, getattr(new_settings, f.name))
         apply_autostart(new_settings)
-        log.info("Settings saved: hotkey=%s mode=%s", new_settings.hotkey, new_settings.mode)
-
-    def on_toggle_mode(new_mode: str) -> None:
-        current_settings["mode"] = new_mode
-        hotkeys.set_mode(new_mode)
-        update_settings(mode=new_mode)
-        log.info("Mode switched to %s", new_mode)
+        log.info("Settings saved: hold=%s live=%s",
+                 new_settings.hotkey, new_settings.live_hotkey)
 
     def apply_autostart(s: Settings) -> None:
         try:
@@ -429,9 +435,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         on_open_settings()
 
     if settings.tray:
-        tray = TrayIcon(on_quit=on_quit, on_toggle_mode=on_toggle_mode,
-                        on_remap=on_open_settings, on_settings=on_open_settings,
-                        mode=current_settings["mode"])
+        tray = TrayIcon(on_quit=on_quit, on_remap=on_open_settings,
+                        on_settings=on_open_settings)
         tray.start()
     engine.set_tray(tray)
     apply_autostart(settings)
@@ -447,35 +452,56 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         finally:
             capture_state["on"] = False
 
-    def on_press() -> None:
+    def on_press_hold() -> None:
         if capture_state["on"]:
             log.debug("Ignoring press while already recording")
             return
         capture_state["on"] = True
-        if not engine.start():
+        if not engine.start(mode="hold"):
             log.debug("Ignoring press while engine is busy finalizing")
             capture_state["on"] = False
             return
         # Event-driven "combo held" flag (not GetAsyncKeyState, which can stay
-        # stuck "down" on the Win key): drives slice-typing deferral in hold
-        # mode. Tap mode leaves it False so live typing works while recording.
-        if current_settings["mode"] == "hold":
-            engine.set_hold_active(True)
+        # stuck "down" on the Win key): drives slice-typing deferral for the
+        # whole recording.
+        engine.set_hold_active(True)
         threading.Thread(target=_capture_thread, daemon=True).start()
 
-    def on_release() -> None:
+    def on_release_hold() -> None:
         # Clear the flag first: the finalize thread reads it to decide whether
         # it can type immediately. The event key-up always arrives, so this
         # clears instantly even if the physical Win key is stuck "down".
         engine.set_hold_active(False)
         engine.stop()
 
-    hotkeys = HotkeyController(current_settings["mode"], current_settings["hotkey"],
-                               on_press, on_release)
-    log.info("Dictation ready. Hotkey: %s (mode: %s).",
-             current_settings["hotkey"], current_settings["mode"])
+    def on_press_live() -> None:
+        if capture_state["on"]:
+            log.debug("Ignoring live-hotkey press while already recording")
+            return
+        capture_state["on"] = True
+        if not engine.start(mode="tap"):
+            log.debug("Ignoring press while engine is busy finalizing")
+            capture_state["on"] = False
+            return
+        # Tap-style: no modifier is held during recording, so live slice
+        # typing is safe immediately; capture() auto-stops on silence.
+        threading.Thread(target=_capture_thread, daemon=True).start()
+
+    # Two independent, fixed-purpose hotkeys instead of one hotkey plus a
+    # runtime mode toggle — each controller is created once and never has its
+    # mode changed, which avoids the class of bug where tearing down one
+    # registration type (add_hotkey) and standing up another (hook) at
+    # runtime left the old one still active internally.
+    hold_hotkey = HotkeyController("hold", current_settings["hotkey"],
+                                   on_press_hold, on_release_hold)
+    live_hotkey = HotkeyController("tap", current_settings["live_hotkey"],
+                                   on_press_live, None)
+    log.info("Dictation ready. Hold %s to dictate, or tap %s for live typing.",
+             current_settings["hotkey"], current_settings["live_hotkey"])
     if settings.tray:
-        toast_win(APP_NAME, f"Ready. Hold {current_settings['hotkey']} to dictate.")
+        toast_win(APP_NAME,
+                 f"Ready. Hold {current_settings['hotkey']} or tap "
+                 f"{current_settings['live_hotkey']} for live typing.")
 
     try:
         while running["v"]:
@@ -483,7 +509,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        hotkeys.stop()
+        hold_hotkey.stop()
+        live_hotkey.stop()
         engine.stop()
         if tray:
             tray.stop()

@@ -9,6 +9,15 @@ from ctypes import wintypes
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 shell32 = ctypes.WinDLL("shell32", use_last_error=True)
 
+# Without explicit argtypes/restype, ctypes marshals wparam/lparam as plain
+# 32-bit ints for this call. Windows can send messages whose wparam/lparam
+# don't fit in 32 bits (common on 64-bit Windows), which raised
+# "OverflowError: int too long to convert" inside the wndproc callback on
+# essentially every non-custom message the toast window received.
+user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                  wintypes.WPARAM, wintypes.LPARAM]
+user32.DefWindowProcW.restype = ctypes.c_longlong
+
 NIM_ADD = 0x00000000
 NIM_MODIFY = 0x00000001
 NIM_DELETE = 0x00000002

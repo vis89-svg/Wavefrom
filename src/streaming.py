@@ -90,12 +90,21 @@ class DictationEngine:
         self._pending_period = False
         self._last_level_report = 0.0
         self._hold_active = False
+        self._mode = getattr(config, "mode", "hold")
 
     # ------------------------------------------------------------- lifecycle
-    def start(self) -> bool:
+    def start(self, mode: str | None = None) -> bool:
+        """Begin a dictation. `mode` ("hold" or "tap") governs this session's
+        behavior — whether live slice typing is deferred until release
+        (hold) or typed as you speak with silence-based auto-stop (tap).
+        Two independent hotkeys can each call this with their own fixed
+        mode; when omitted (offline callers like dictate_bytes()/tests),
+        falls back to the config's mode default.
+        """
         if self._busy.is_set():
             log.warning("Engine busy; ignoring start")
             return False
+        self._mode = mode or getattr(self._config, "mode", "hold")
         self._busy.set()
         self._stop_capture.clear()
         self._active.set()
@@ -113,7 +122,7 @@ class DictationEngine:
         # would reach the app as shortcuts (no visible text) yet inflate
         # _typed_text — which previously let the final diff backspace far
         # beyond this dictation's own text.
-        self._hold_active = getattr(self._config, "mode", "hold") == "hold"
+        self._hold_active = self._mode == "hold"
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
         return True
@@ -151,7 +160,7 @@ class DictationEngine:
         in tap mode a long silence auto-stops the capture.
         """
         rate = self._config.sample_rate
-        hold_mode = getattr(self._config, "mode", "hold") == "hold"
+        hold_mode = self._mode == "hold"
         chunk = int(rate * 0.03)
         buffer: list[np.ndarray] = []
         all_frames: list[np.ndarray] = []
@@ -293,7 +302,7 @@ class DictationEngine:
                     appended = (appended + " " if appended else "") + "."
             committed_text = " ".join(self._committed)
         if self._injector and appended:
-            if self._hold_active or getattr(self._config, "mode", "hold") == "hold":
+            if self._hold_active or self._mode == "hold":
                 # Hold mode never types slices live: everything is typed at
                 # finalize by the early-type, which runs right after the user
                 # releases. Typing a slice here — even one transcribed after
@@ -402,17 +411,86 @@ class DictationEngine:
             return ""
         return title
 
+    def _context_matches(self, baseline: dict, now: dict) -> tuple[bool, bool]:
+        """Compare two capture_typing_context() snapshots.
+
+        Returns (window_ok, caret_ok). window_ok is False when focus moved to
+        a different window; caret_ok is False when the caret moved more than
+        a couple pixels within the same window. Shared by every point in this
+        engine that is about to type or backspace based on a snapshot taken
+        before a slow call (LLM cleanup/polish) — never act on a stale one.
+        """
+        window_ok = now["hwnd"] == baseline["hwnd"]
+        caret_ok = True
+        if window_ok and baseline["caret"] is not None and now["caret"] is not None:
+            bx, by = baseline["caret"]
+            nx, ny = now["caret"]
+            if nx < bx - 2 or nx > bx + 2 or ny < by - 2 or ny > by + 2:
+                caret_ok = False
+        return window_ok, caret_ok
+
     def _finalize(self, wav_bytes: bytes | None) -> None:
         with self._lock:
             raw = " ".join(self._committed)
             typed = self._typed_text
         # Collapse loops/echoes in the streaming text before it is typed, so
-        # the early-type sends clean text and the final diff has little to
-        # backspace (fewer keystrokes = less room for a destructive diff).
+        # whatever gets typed first is already as clean as possible.
         raw = strip_trailing_repeat(collapse_adjacent_repeats(raw))
 
         baseline = None
-        if self._injector and wav_bytes and raw and not self._hold_active:
+        pre_cleaned = False
+        quick = None
+        if (self._injector and wav_bytes and raw and not self._hold_active
+                and not typed and self._cleaner):
+            # Nothing is on screen yet (hold mode never types live) and a
+            # cleaner is configured: run cleanup BEFORE typing anything, so
+            # the very first text the user sees is already correct instead of
+            # typing raw text and then visibly swapping it out afterward.
+            self._wait_hold_release()
+            quick_base = raw
+            if quick_base[-1] not in PUNCT:
+                quick_base += "."
+            correction_map = getattr(self._config, "correction_map", None) or {}
+            for wrong, right in correction_map.items():
+                quick_base = quick_base.replace(wrong, right)
+            from src.merge import fuzzy_glossary_replace
+            glossary = getattr(self._config, "glossary", None) or []
+            quick_base = fuzzy_glossary_replace(quick_base, glossary)
+
+            from src.inject import capture_typing_context
+            baseline = capture_typing_context()
+            self._status.state = "cleaning"
+            self._overlay_state("cleaning", self._status.committed_text)
+            self._notify_tray()
+            try:
+                quick = self._cleaner.clean(quick_base, app_hint=self._app_hint())
+            except Exception as e:
+                log.warning("Pre-type cleanup failed, using raw: %s", e)
+                quick = quick_base
+            if not quick or not quick.strip():
+                quick = quick_base
+            elif quick[-1] not in PUNCT:
+                quick += "."
+
+            now = capture_typing_context()
+            window_ok, caret_ok = self._context_matches(baseline, now)
+            if window_ok and caret_ok:
+                self._injector.inject_text(quick)
+                typed = quick
+                self._typed_chars = len(quick)
+                log.info("Pre-typed cleaned text (%d chars)", len(quick))
+            else:
+                # Focus/caret moved during the cleanup call: don't type stale
+                # text into a window the user may have left. The cleaned text
+                # still lands in the review panel (Polish/Send/Clipboard) via
+                # committed_text below, so nothing is lost.
+                log.warning("Pre-type skipped (window=%s caret=%s); text kept "
+                            "in review panel only", window_ok, caret_ok)
+                typed = ""
+                self._typed_chars = 0
+            pre_cleaned = True
+
+        elif self._injector and wav_bytes and raw and not self._hold_active:
             from src.inject import capture_typing_context
             # Snapshot where the caret/focus is now; the final correction may
             # only touch this window/position seconds later (after the full
@@ -440,6 +518,7 @@ class DictationEngine:
                      len(typed), len(raw), len(tail), self._typed_chars)
 
         final = raw
+        heavy_pass_changed = False
         if wav_bytes:
             # Skip expensive full-audio re-transcription for short dictations
             # (< 12s) — streaming slices already covered it well with overlap.
@@ -455,7 +534,10 @@ class DictationEngine:
                         if self._verify_enabled():
                             full_text = self._verify_and_reconcile(
                                 full_text, primary_low, wav_bytes)
-                        final = union_text(full_text.strip(), raw)
+                        unioned = union_text(full_text.strip(), raw)
+                        if unioned != raw:
+                            final = unioned
+                            heavy_pass_changed = True
                 except Exception as e:
                     log.warning("Full-audio transcription failed, using merged slices: %s", e)
             else:
@@ -472,23 +554,30 @@ class DictationEngine:
         if final[-1] not in PUNCT:
             final += "."
 
-        correction_map = getattr(self._config, "correction_map", None) or {}
-        if correction_map:
-            for wrong, right in correction_map.items():
-                final = final.replace(wrong, right)
+        if pre_cleaned and not heavy_pass_changed:
+            # `quick` is already the correctly-cleaned version of this exact
+            # text (the heavy pass either didn't run or found nothing new) —
+            # reuse it instead of paying for (and risking phrasing drift from)
+            # a second LLM call on unchanged input.
+            final = quick
+        else:
+            correction_map = getattr(self._config, "correction_map", None) or {}
+            if correction_map:
+                for wrong, right in correction_map.items():
+                    final = final.replace(wrong, right)
 
-        from src.merge import fuzzy_glossary_replace
-        glossary = getattr(self._config, "glossary", None) or []
-        final = fuzzy_glossary_replace(final, glossary)
+            from src.merge import fuzzy_glossary_replace
+            glossary = getattr(self._config, "glossary", None) or []
+            final = fuzzy_glossary_replace(final, glossary)
 
-        if self._cleaner:
-            self._status.state = "cleaning"
-            self._overlay_state("cleaning", self._status.committed_text)
-            self._notify_tray()
-            try:
-                final = self._cleaner.clean(final, app_hint=self._app_hint())
-            except Exception as e:
-                log.warning("Cleanup failed, using raw transcript: %s", e)
+            if self._cleaner:
+                self._status.state = "cleaning"
+                self._overlay_state("cleaning", self._status.committed_text)
+                self._notify_tray()
+                try:
+                    final = self._cleaner.clean(final, app_hint=self._app_hint())
+                except Exception as e:
+                    log.warning("Cleanup failed, using raw transcript: %s", e)
 
         if self._injector and wav_bytes:
             # Hold off the final typing while the hotkey is held (e.g. the user
@@ -498,40 +587,35 @@ class DictationEngine:
             # instead of waiting out a stuck physical Win key.
             self._wait_hold_release()
             to_delete, to_type = diff_plan(typed, final)
-            window_ok = caret_ok = ledger_ok = True
-            if baseline is not None:
-                from src.inject import capture_typing_context
-                now = capture_typing_context()
-                if now["hwnd"] != baseline["hwnd"]:
-                    window_ok = False
-                elif baseline["caret"] is not None and now["caret"] is not None:
-                    bx, by = baseline["caret"]
-                    nx, ny = now["caret"]
-                    if nx < bx - 2 or nx > bx + 2 or ny < by - 2 or ny > by + 2:
-                        caret_ok = False
-            if to_delete > self._typed_chars:
-                ledger_ok = False
-            log.info("Final correction: raw=%d typed=%d final=%d prefix=%d "
-                     "to_delete=%d to_type=%d ledger=%d window=%s caret=%s",
-                     len(raw), len(typed), len(final),
-                     len(typed) - to_delete, to_delete, len(to_type),
-                     self._typed_chars, window_ok, caret_ok)
-            if window_ok and caret_ok and ledger_ok:
-                if to_delete:
-                    self._injector.delete_chars(to_delete)
-                    self._typed_chars = max(0, self._typed_chars - to_delete)
-                if to_type:
-                    self._injector.inject_text(to_type)
-                    self._typed_chars += len(to_type)
-            else:
-                # The screen no longer matches the engine's bookkeeping (focus
-                # moved, caret moved, or the bookkeeping claims more text than
-                # this dictation actually typed). Backspacing now could destroy
-                # pre-existing text (e.g. a previous dictation), so leave the
-                # screen untouched — the early-typed raw text stays.
-                log.warning("Correction skipped (window=%s caret=%s ledger=%s); "
-                            "on-screen text left as-is", window_ok, caret_ok,
-                            ledger_ok)
+            if to_delete or to_type:
+                window_ok = caret_ok = ledger_ok = True
+                if baseline is not None:
+                    from src.inject import capture_typing_context
+                    now = capture_typing_context()
+                    window_ok, caret_ok = self._context_matches(baseline, now)
+                if to_delete > self._typed_chars:
+                    ledger_ok = False
+                log.info("Final correction: raw=%d typed=%d final=%d prefix=%d "
+                         "to_delete=%d to_type=%d ledger=%d window=%s caret=%s",
+                         len(raw), len(typed), len(final),
+                         len(typed) - to_delete, to_delete, len(to_type),
+                         self._typed_chars, window_ok, caret_ok)
+                if window_ok and caret_ok and ledger_ok:
+                    if to_delete:
+                        self._injector.delete_chars(to_delete)
+                        self._typed_chars = max(0, self._typed_chars - to_delete)
+                    if to_type:
+                        self._injector.inject_text(to_type)
+                        self._typed_chars += len(to_type)
+                else:
+                    # The screen no longer matches the engine's bookkeeping (focus
+                    # moved, caret moved, or the bookkeeping claims more text than
+                    # this dictation actually typed). Backspacing now could destroy
+                    # pre-existing text (e.g. a previous dictation), so leave the
+                    # screen untouched.
+                    log.warning("Correction skipped (window=%s caret=%s ledger=%s); "
+                                "on-screen text left as-is", window_ok, caret_ok,
+                                ledger_ok)
 
         self._status.state = "idle"
         self._status.committed_text = final
@@ -578,15 +662,9 @@ class DictationEngine:
             polished += "."
         if self._injector:
             to_delete, to_type = diff_plan(final, polished)
-            window_ok = caret_ok = ledger_ok = True
             now = capture_typing_context()
-            if now["hwnd"] != baseline["hwnd"]:
-                window_ok = False
-            elif baseline["caret"] is not None and now["caret"] is not None:
-                bx, by = baseline["caret"]
-                nx, ny = now["caret"]
-                if nx < bx - 2 or nx > bx + 2 or ny < by - 2 or ny > by + 2:
-                    caret_ok = False
+            window_ok, caret_ok = self._context_matches(baseline, now)
+            ledger_ok = True
             if to_delete > self._typed_chars:
                 ledger_ok = False
             log.info("Polish correction: final=%d polished=%d prefix=%d "

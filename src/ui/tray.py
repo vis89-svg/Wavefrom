@@ -19,12 +19,10 @@ STATE_COLORS = {
 
 
 class TrayIcon:
-    def __init__(self, on_quit=None, on_toggle_mode=None, on_remap=None, on_settings=None, mode="hold"):
+    def __init__(self, on_quit=None, on_remap=None, on_settings=None):
         self._icon = None
         self._state = "idle"
-        self._mode = mode
         self._on_quit = on_quit
-        self._on_toggle_mode = on_toggle_mode
         self._on_remap = on_remap
         self._on_settings = on_settings
 
@@ -45,12 +43,6 @@ class TrayIcon:
         if self._on_settings:
             self._on_settings()
 
-    def _on_menu_toggle(self, icon, item):
-        self._mode = "tap" if self._mode == "hold" else "hold"
-        if self._on_toggle_mode:
-            self._on_toggle_mode(self._mode)
-        icon.update_menu()
-
     def _on_menu_remap(self, icon, item):
         if self._on_remap:
             self._on_remap()
@@ -61,8 +53,6 @@ class TrayIcon:
             self._make_image(),
             "Dictation — idle",
             menu=pystray.Menu(
-                pystray.MenuItem(lambda item: f"Mode: {self._mode} (click to toggle)",
-                                 self._on_menu_toggle, default=False),
                 pystray.MenuItem("Remap hotkey", self._on_menu_remap),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Settings", self._on_menu_settings),
@@ -80,14 +70,6 @@ class TrayIcon:
                 self._icon.title = f"Dictation — {self._state}"
             except Exception as e:
                 log.debug("tray update failed: %s", e)
-
-    def set_mode(self, mode: str) -> None:
-        self._mode = mode
-        if self._icon:
-            try:
-                self._icon.update_menu()
-            except Exception:
-                pass
 
     def stop(self) -> None:
         if self._icon:

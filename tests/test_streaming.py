@@ -130,6 +130,11 @@ def test_finalize_full_audio_merges_missed_content():
 
 
 def test_finalize_cleanup_replaces_text():
+    # Cleanup runs BEFORE typing (hold mode, nothing on screen yet), so the
+    # cleaned text is typed once. The full-audio pass here finds nothing new
+    # (same content, re-cleaned to the same fixed string by FakeCleaner), so
+    # no correction/backspacing should happen at all — this is the exact
+    # flicker bug being fixed: no more delete-then-retype when nothing changed.
     transcriber = FakeTranscriber(["um hello world"])
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
@@ -147,8 +152,40 @@ def test_finalize_cleanup_replaces_text():
     engine._worker.join(timeout=5)
 
     assert engine.status.committed_text == "hello world, everyone here."
+    assert injector.deleted == 0
+    assert injector.parts == ["hello world, everyone here."]
+
+
+def test_finalize_background_correction_after_quick_type():
+    # Long recording + cleaner: the streaming slices miss "this is streaming"
+    # (only the full-audio pass hears it). The quick-cleaned text is typed
+    # immediately (pre-type), and once the heavy pass genuinely recovers new
+    # content, a real correction follows — unlike the no-op case in
+    # test_finalize_cleanup_replaces_text, this one SHOULD backspace/retype.
+    transcriber = FakeTranscriber([
+        "hello world goodbye",                        # slice
+        "hello world this is streaming goodbye",      # full-audio chunk
+    ])
+    injector = FakeInjector()
+    engine = make_engine(transcriber, injector)
+
+    class FakeCleaner:
+        def clean(self, raw: str, app_hint: str | None = None) -> str:
+            return raw.replace("goodbye", "farewell")
+
+    engine._cleaner = FakeCleaner()
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000 * 15, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine.set_hold_active(False)
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    # The first thing typed is the quick-cleaned (but incomplete) text.
+    assert injector.parts[0] == "hello world farewell."
+    # A real correction follows since the heavy pass found genuinely new content.
     assert injector.deleted > 0
-    assert any(", everyone here." in p for p in injector.parts)
+    assert engine.status.committed_text == "hello world this is streaming farewell."
 
 
 def test_slice_failure_records_error_and_notifies():
@@ -586,6 +623,7 @@ def test_slice_with_adjacent_loop_is_collapsed():
     injector = FakeInjector()
     engine = make_engine(FakeTranscriber(["we are done we are done"]), injector)
     engine._config.mode = "tap"
+    engine._mode = "tap"  # _process_slice() is called directly, bypassing start()
 
     engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
 
@@ -598,6 +636,7 @@ def test_slice_short_stutter_is_preserved():
     injector = FakeInjector()
     engine = make_engine(FakeTranscriber(["no no no and then we left"]), injector)
     engine._config.mode = "tap"
+    engine._mode = "tap"  # _process_slice() is called directly, bypassing start()
 
     engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
 
@@ -694,6 +733,7 @@ def test_glossary_words_in_speech_are_not_dropped_as_echo():
         FakeTranscriber(["superintendent intimated institution"]), injector)
     engine._config = config
     engine._config.mode = "tap"
+    engine._mode = "tap"  # _process_slice() is called directly, bypassing start()
     engine._committed = ["the", "meeting", "is", "at", "ten"]
     engine._typed_text = "the meeting is at ten"
 
@@ -746,8 +786,9 @@ def test_finalize_early_types_raw_then_period_diff():
 
 
 def test_finalize_early_type_then_cleanup_refines():
-    # The early raw type must be replaced by the cleaned final via diff_plan
-    # (delete the stale tail, type the cleaned text).
+    # Hold mode + a cleaner + nothing on screen yet: cleanup runs BEFORE
+    # typing, so only the already-cleaned text is typed once. No raw type,
+    # no backspace/retype.
     transcriber = FakeTranscriber(["irrelevant"])
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
@@ -763,9 +804,8 @@ def test_finalize_early_type_then_cleanup_refines():
     wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
     engine._finalize(wav)
 
-    assert injector.parts[0] == "um hello world"
-    assert injector.deleted == len("um hello world")
-    assert injector.parts[-1] == "hello world, everyone here."
+    assert injector.parts == ["hello world, everyone here."]
+    assert injector.deleted == 0
 
 
 # ------------------------------------------------------- hold-mode deferral belt
@@ -831,6 +871,7 @@ def test_tap_mode_typed_text_tracks_actual_screen_text():
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
     engine._config.mode = "tap"
+    engine._mode = "tap"  # _process_slice() is called directly, bypassing start()
 
     engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
     engine._process_slice(_to_wav(np.zeros(1600, dtype=np.int16), 16000))
@@ -920,10 +961,16 @@ def _scenario_broken_ledger():
 
 
 def test_correction_skipped_when_foreground_window_changes(monkeypatch):
+    # Hold mode + cleaner + nothing on screen yet hits the quick-clean path:
+    # cleanup runs before typing, then the context is re-checked right before
+    # typing. Focus moved during cleanup, so nothing is typed at all (never
+    # type stale/cleaned text into a window the user may have left) — the
+    # cleaned text still ends up in committed_text for the review panel.
     from src import inject as inject_mod
     snapshots = iter([
-        {"hwnd": 100, "caret": (500, 100)},
-        {"hwnd": 200, "caret": (500, 100)},   # focus moved to another window
+        {"hwnd": 100, "caret": (500, 100)},   # baseline, before cleanup
+        {"hwnd": 200, "caret": (500, 100)},   # focus moved during cleanup
+        {"hwnd": 200, "caret": (500, 100)},   # still moved at correction time
     ])
     monkeypatch.setattr(inject_mod, "capture_typing_context",
                         lambda: next(snapshots))
@@ -931,8 +978,9 @@ def test_correction_skipped_when_foreground_window_changes(monkeypatch):
     engine, injector, wav = _scenario_broken_ledger()
     engine._finalize(wav)
 
-    assert injector.parts == ["um hello"]   # early-type still typed the raw
-    assert injector.deleted == 0            # but the correction was skipped
+    assert injector.parts == []             # nothing typed anywhere
+    assert injector.deleted == 0
+    assert engine.status.committed_text == "cleaned final text."
 
 
 # ------------------------------------------------------- on-demand polish pass
@@ -1032,10 +1080,13 @@ def test_engine_polish_skipped_when_window_changes(monkeypatch):
 
 
 def test_correction_skipped_when_caret_moves(monkeypatch):
+    # Same as the window-change case, but the caret moved within the same
+    # window (e.g. the user clicked elsewhere / pressed Home) during cleanup.
     from src import inject as inject_mod
     snapshots = iter([
-        {"hwnd": 100, "caret": (500, 100)},
+        {"hwnd": 100, "caret": (500, 100)},   # baseline, before cleanup
         {"hwnd": 100, "caret": (30, 100)},    # user clicked elsewhere / Home
+        {"hwnd": 100, "caret": (30, 100)},    # still moved at correction time
     ])
     monkeypatch.setattr(inject_mod, "capture_typing_context",
                         lambda: next(snapshots))
@@ -1043,8 +1094,9 @@ def test_correction_skipped_when_caret_moves(monkeypatch):
     engine, injector, wav = _scenario_broken_ledger()
     engine._finalize(wav)
 
-    assert injector.parts == ["um hello"]   # early-type still typed the raw
-    assert injector.deleted == 0            # but the correction was skipped
+    assert injector.parts == []             # nothing typed anywhere
+    assert injector.deleted == 0
+    assert engine.status.committed_text == "cleaned final text."
 
 
 # ------------------------------------------------------- send / clipboard

@@ -326,6 +326,7 @@ class OverlayWindow:
         """Handle send result from the queue."""
         if not self._root or not self._panel_shown:
             return
+        self._polishing = False
         if text:
             log.info("Send: polished text sent (%d chars)", len(text))
             self._state_lbl.config(text="Sent", fg=_STATE_COLORS["done"])
@@ -344,6 +345,7 @@ class OverlayWindow:
         """Handle clipboard result from the queue."""
         if not self._root or not self._panel_shown:
             return
+        self._polishing = False
         if text:
             log.info("Clipboard: copied polished text (%d chars)", len(text))
             self._state_lbl.config(text="Copied", fg=_STATE_COLORS["done"])

@@ -53,7 +53,8 @@ def show_settings_dialog(settings, on_save=None) -> bool:
     frm.columnconfigure(1, weight=1)
 
     hotkey_var = tk.StringVar(value=settings.hotkey)
-    mode_var = tk.StringVar(value=settings.mode)
+    live_hotkey_var = tk.StringVar(
+        value=getattr(settings, "live_hotkey", "ctrl+alt+d"))
     lang_var = tk.StringVar(value=settings.language or "")
     glossary_var = tk.StringVar(value=", ".join(settings.glossary))
     cleanup_mode_var = tk.StringVar(
@@ -73,14 +74,15 @@ def show_settings_dialog(settings, on_save=None) -> bool:
         widget.grid(row=row, column=1, sticky="ew", pady=3)
 
     row = 0
-    field(row, "Hotkey (e.g. ctrl+win)",
+    field(row, "Hold hotkey (e.g. ctrl+win)",
           ttk.Entry(frm, textvariable=hotkey_var, width=30))
+    ttk.Label(frm, text="Hold, speak, release — types once, already cleaned up").grid(
+        row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
     row += 1
 
-    mode_box = ttk.Combobox(frm, textvariable=mode_var, state="readonly",
-                            values=("hold", "tap"), width=28)
-    field(row, "Mode", mode_box)
-    ttk.Label(frm, text="hold = press-hold-release · tap = toggle on/off").grid(
+    field(row, "Live hotkey (e.g. ctrl+alt+d)",
+          ttk.Entry(frm, textvariable=live_hotkey_var, width=30))
+    ttk.Label(frm, text="Tap once (don't hold), then speak — types live as you talk").grid(
         row=row, column=0, columnspan=2, sticky="w", padx=(8, 0))
     row += 1
 
@@ -148,15 +150,21 @@ def show_settings_dialog(settings, on_save=None) -> bool:
 
     def _save():
         hotkey = hotkey_var.get().strip().lower()
-        if not hotkey:
-            messagebox.showerror("Settings", "Hotkey cannot be empty.")
+        live_hotkey = live_hotkey_var.get().strip().lower()
+        if not hotkey or not live_hotkey:
+            messagebox.showerror("Settings", "Neither hotkey can be empty.")
             return
-        conflict = _hotkey_conflict(hotkey)
-        if conflict:
+        if _normalize_hotkey(hotkey) == _normalize_hotkey(live_hotkey):
             messagebox.showerror(
-                "Settings",
-                f"'{hotkey}' conflicts with {conflict}. Pick another hotkey.")
+                "Settings", "Hold hotkey and Live hotkey must be different.")
             return
+        for label, hk in (("Hold hotkey", hotkey), ("Live hotkey", live_hotkey)):
+            conflict = _hotkey_conflict(hk)
+            if conflict:
+                messagebox.showerror(
+                    "Settings",
+                    f"{label} '{hk}' conflicts with {conflict}. Pick another.")
+                return
         key = key_var.get().strip()
         if key:
             try:
@@ -174,7 +182,7 @@ def show_settings_dialog(settings, on_save=None) -> bool:
         updated = type(settings)(**{
             **asdict(settings),
             "hotkey": hotkey,
-            "mode": mode_var.get(),
+            "live_hotkey": live_hotkey,
             "language": lang_var.get().strip() or None,
             "cleanup_model": "openai/gpt-oss-20b"
             if cleanup_mode_var.get() != "off" else None,

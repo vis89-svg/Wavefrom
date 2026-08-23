@@ -1,9 +1,10 @@
 {
   "hotkey": "ctrl+win",
-  "mode": "hold",
+  "mode": "tap",
   "whisper_model": "whisper-large-v3-turbo",
   "cleanup_model": "openai/gpt-oss-20b",
   "cleanup_mode": "correcting",
+  "polish_model": "openai/gpt-oss-120b",
   "language": "en",
   "sample_rate": 16000,
   "toasts": true,

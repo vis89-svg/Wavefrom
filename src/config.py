@@ -44,7 +44,10 @@ except ImportError:
 @dataclass
 class Settings:
     hotkey: str = "ctrl+win"
-    mode: str = "hold"  # hold | tap
+    mode: str = "hold"  # hold | tap — legacy default mode for start() when no
+                        # explicit mode is passed (e.g. dictate_bytes()/tests);
+                        # the live app now always passes an explicit mode.
+    live_hotkey: str = "ctrl+alt+d"  # tap-style live-typing hotkey
     whisper_model: str = DEFAULT_WHISPER_MODEL
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
     cleanup_mode: str = "correcting"  # correcting | conservative | polish
