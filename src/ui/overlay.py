@@ -46,6 +46,7 @@ _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
 _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
+_WS_EX_NOACTIVATE = 0x08000000
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
@@ -323,6 +324,7 @@ class OverlayWindow:
         self._txt.config(state="disabled")
         self._polishing = False
         self._polish_btn.config(state="normal", text="Polish")
+        self._send_btn.config(state="normal", text="Send")
         self._place_review_panel()
         self._set_interactive(True)
 
@@ -490,7 +492,12 @@ class OverlayWindow:
 
         Live indicator mode is click-through (WS_EX_TRANSPARENT) so it never
         blocks the app underneath. The review panel clears that flag so the
-        Polish / X buttons are clickable.
+        Polish / Send / Clipboard / X buttons are clickable. WS_EX_NOACTIVATE
+        is applied in both cases so clicking a button never steals Win32
+        foreground focus from the app the user was dictating into — Send and
+        Polish both inject by pasting into whatever window currently has
+        focus, so if the popup became foreground on click, the paste would
+        land in the (non-editable) popup instead of the target app.
         """
         try:
             hwnd = _user32.GetParent(self._root.winfo_id())
@@ -506,7 +513,7 @@ class OverlayWindow:
                 style = style | _WS_EX_TRANSPARENT
             SetWindowLongPtrW(
                 hwnd, _GWL_EXSTYLE,
-                style | _WS_EX_LAYERED | _WS_EX_TOOLWINDOW)
+                style | _WS_EX_LAYERED | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE)
         except Exception as e:
             log.debug("Click-through toggle failed: %s", e)
 
