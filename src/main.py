@@ -423,6 +423,12 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
     def on_quit() -> None:
         app.quit()
 
+    def on_show_main() -> None:
+        if main_win:
+            main_win.show()
+            main_win.raise_()
+            main_win.activateWindow()
+
     def on_open_settings() -> None:
         s = load_settings()
         show_settings_dialog(s, on_save=on_settings_saved)
@@ -452,7 +458,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
 
     if settings.tray:
         tray = TrayIcon(on_quit=on_quit, on_remap=on_open_settings,
-                        on_settings=on_open_settings)
+                        on_settings=on_open_settings, on_show=on_show_main)
         tray.start()
     engine.set_tray(tray)
     apply_autostart(settings)

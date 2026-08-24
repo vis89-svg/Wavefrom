@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -116,6 +116,11 @@ class MainWindow(QMainWindow):
             if b is not btn:
                 b.setChecked(False)
         self._stack.setCurrentWidget(page)
+
+    def closeEvent(self, event: QEvent) -> None:
+        """Hide to tray instead of quitting — app keeps running in tray."""
+        event.ignore()
+        self.hide()
 
     def refresh_history(self) -> None:
         """Refresh the history page (call after a new dictation is recorded)."""

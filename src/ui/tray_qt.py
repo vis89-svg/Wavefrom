@@ -41,12 +41,18 @@ def _make_icon(color_hex: str = "#787878") -> QIcon:
 class TrayIcon:
     """Qt system-tray icon.  Create on the main thread before app.exec()."""
 
-    def __init__(self, on_quit=None, on_remap=None, on_settings=None):
+    def __init__(self, on_quit=None, on_remap=None, on_settings=None,
+                 on_show=None):
         self._tray = QSystemTrayIcon()
         self._tray.setIcon(_make_icon())
         self._tray.setToolTip("Dictation \u2014 idle")
 
         menu = QMenu()
+        if on_show:
+            a_open = QAction("Open", menu)
+            a_open.triggered.connect(on_show)
+            menu.addAction(a_open)
+            menu.addSeparator()
         if on_remap:
             a_remap = QAction("Remap hotkey", menu)
             a_remap.triggered.connect(on_remap)
