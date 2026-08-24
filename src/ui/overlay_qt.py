@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -76,6 +76,7 @@ _BAR_COUNT = 14
 _OFFSET_X = 18
 _OFFSET_Y = 26
 _PREVIEW_CHARS = 500
+_AUTO_DISMISS_MS = 15000
 
 
 # ── Win32 helpers ─────────────────────────────────────────────────────────────
@@ -233,6 +234,8 @@ class OverlayWindow(QWidget):
         self._visible = False
         self._polishing = False
         self._panel_shown = False
+        self._hold_hotkey = ""
+        self._live_hotkey = ""
 
         self._polish_callback = None
         self._send_callback = None
@@ -241,6 +244,10 @@ class OverlayWindow(QWidget):
 
         self._build_ui()
         self._connect_signals()
+
+        self._dismiss_timer = QTimer(self)
+        self._dismiss_timer.setSingleShot(True)
+        self._dismiss_timer.timeout.connect(self._on_auto_dismiss)
 
     # ── UI construction ──────────────────────────────────────────────────
     def _build_ui(self) -> None:
@@ -251,6 +258,10 @@ class OverlayWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+        self._root_lay = QVBoxLayout(self)
+        self._root_lay.setContentsMargins(0, 0, 0, 0)
+        self._root_lay.setSpacing(0)
 
         # ── Pill container (live view) ───────────────────────────────────
         self._pill = QWidget(self)
@@ -287,12 +298,20 @@ class OverlayWindow(QWidget):
         self._waveform = WaveformBars(self._pill)
         pill_lay.addWidget(self._waveform)
 
+        self._hotkey_lbl = QLabel("")
+        self._hotkey_lbl.setStyleSheet("color: #6a6e78; font: 9px 'Segoe UI';")
+        pill_lay.addWidget(self._hotkey_lbl)
+
         # ── Review container (done view) ─────────────────────────────────
         self._review = QWidget(self)
         self._review.setObjectName("review")
         self._review.setStyleSheet(_REVIEW_STYLE)
         rev_lay = QVBoxLayout(self._review)
         rev_lay.setContentsMargins(10, 8, 10, 8)
+
+        self._hotkey_lbl_review = QLabel("")
+        self._hotkey_lbl_review.setStyleSheet("color: #6a6e78; font: 9px 'Segoe UI';")
+        rev_lay.addWidget(self._hotkey_lbl_review)
 
         self._txt = QTextEdit()
         self._txt.setReadOnly(True)
@@ -333,9 +352,12 @@ class OverlayWindow(QWidget):
 
         rev_lay.addLayout(btn_row)
 
+        self._root_lay.addWidget(self._pill)
+        self._root_lay.addWidget(self._review)
+
         # Initially show pill, hide review
-        self._pill.show()
-        self._review.hide()
+        self._pill.setVisible(True)
+        self._review.setVisible(False)
 
         # Shadow
         shadow = QGraphicsDropShadowEffect(self)
@@ -376,6 +398,13 @@ class OverlayWindow(QWidget):
     def set_stop_callback(self, callback) -> None:
         self._stop_callback = callback
 
+    def set_hotkeys(self, hold: str, live: str) -> None:
+        self._hold_hotkey = hold
+        self._live_hotkey = live
+        text = f"Hold {hold} · Tap {live}"
+        self._hotkey_lbl.setText(text)
+        self._hotkey_lbl_review.setText(text)
+
     def start(self) -> None:
         self.show()
         self._visible = False  # will be shown by _apply_state
@@ -415,6 +444,7 @@ class OverlayWindow(QWidget):
             self._show_live(state, text)
 
     def _show_live(self, state: str, text: str) -> None:
+        self._dismiss_timer.stop()
         if self._panel_shown:
             self._review.hide()
             self._panel_shown = False
@@ -441,6 +471,7 @@ class OverlayWindow(QWidget):
         self._send_btn.setText("Send")
         self._place_review_panel()
         self._set_interactive(True)
+        self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     # ── Result handlers (GUI thread) ────────────────────────────────────
     def _apply_polish_result(self, result) -> None:
@@ -461,6 +492,8 @@ class OverlayWindow(QWidget):
             self._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
             )
+        if self._panel_shown:
+            self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     def _apply_send_result(self, text: str | None) -> None:
         self._polishing = False
@@ -478,6 +511,7 @@ class OverlayWindow(QWidget):
         self._send_btn.setText("Send")
         if self._panel_shown:
             self._txt.setPlainText((text or "").strip())
+            self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     def _apply_clipboard_result(self, text: str | None) -> None:
         self._polishing = False
@@ -491,6 +525,8 @@ class OverlayWindow(QWidget):
             self._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
             )
+        if self._panel_shown:
+            self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     # ── Level feed (GUI thread) ─────────────────────────────────────────
     def _on_level(self, db: float) -> None:
@@ -501,6 +537,7 @@ class OverlayWindow(QWidget):
     def _on_polish(self) -> None:
         if self._polishing or self._polish_callback is None:
             return
+        self._dismiss_timer.stop()
         self._polishing = True
         self._polish_btn.setEnabled(False)
         self._polish_btn.setText("Polishing\u2026")
@@ -517,6 +554,7 @@ class OverlayWindow(QWidget):
     def _on_send(self) -> None:
         if self._polishing or self._send_callback is None:
             return
+        self._dismiss_timer.stop()
         self._polishing = True
         self._send_btn.setEnabled(False)
         self._send_btn.setText("Sending\u2026")
@@ -533,6 +571,7 @@ class OverlayWindow(QWidget):
     def _on_clipboard(self) -> None:
         if self._polishing or self._clipboard_callback is None:
             return
+        self._dismiss_timer.stop()
         self._polishing = True
         threading.Thread(
             target=self._run_clipboard, daemon=True, name="overlay-clipboard"
@@ -549,13 +588,21 @@ class OverlayWindow(QWidget):
     def _on_stop(self) -> None:
         if self._stop_callback is None:
             return
+        self._dismiss_timer.stop()
         self._stop_btn.setEnabled(False)
         self._stop_btn.setText("Stopping\u2026")
         threading.Thread(target=self._stop_callback, daemon=True, name="overlay-stop").start()
 
     def _on_close(self) -> None:
+        self._dismiss_timer.stop()
         self.hide()
         self._visible = False
+        self._panel_shown = False
+
+    def _on_auto_dismiss(self) -> None:
+        self.hide()
+        self._visible = False
+        self._panel_shown = False
 
     # ── Placement ────────────────────────────────────────────────────────
     def _place_near_cursor(self) -> None:

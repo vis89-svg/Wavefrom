@@ -346,13 +346,22 @@ class HotkeyController:
                 return
             time.sleep(self.WATCH_POLL_SECS)
 
+    def _tap_callback(self) -> None:
+        try:
+            self._on_press()
+        except Exception as e:
+            # add_hotkey() calls this directly on the keyboard library's hook
+            # thread with no exception guard of its own -- without this, a
+            # failure here (e.g. engine.start() raising) vanishes silently.
+            log.warning("Live-hotkey callback error: %s", e)
+
     def _register(self) -> None:
         if self._hook is not None:
             self._unregister()
         if self._mode == "hold":
             self._hook = keyboard.hook(self._callback, suppress=True)
         else:
-            self._hook = keyboard.add_hotkey(self._hotkey, self._on_press, suppress=True)
+            self._hook = keyboard.add_hotkey(self._hotkey, self._tap_callback, suppress=True)
         self._hook_mode = self._mode
 
     def _unregister(self) -> None:
@@ -386,8 +395,16 @@ class HotkeyController:
 
 def _run_app(settings: Settings, api_key: str, inject: bool = True,
              app=None, display_name: str = "") -> int:
-    from PySide6.QtCore import QTimer
+    from PySide6.QtCore import QObject, Qt, QTimer, Signal
     from PySide6.QtWidgets import QApplication
+
+    class _HistoryUpdateBridge(QObject):
+        """Marshals DictationEngine's history-update callback (fired from its
+        worker thread) onto the Qt GUI thread via a queued connection, so
+        MainWindow.refresh_history() -- which touches Qt widgets -- is never
+        called cross-thread."""
+
+        updated = Signal()
 
     if app is None:
         app = QApplication.instance() or QApplication(sys.argv)
@@ -405,12 +422,15 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
         from src.ui.overlay_qt import OverlayWindow as QtOverlayWindow
         overlay = QtOverlayWindow()
         overlay.start()
+        overlay.set_hotkeys(settings.hotkey, settings.live_hotkey)
 
     engine = DictationEngine(
         settings, transcriber, cleaner=cleaner, injector=injector,
         notify=toast_win if settings.toasts else None,
         overlay=overlay, history=history_mod,
     )
+    history_bridge = _HistoryUpdateBridge()
+    engine.on_history_update = history_bridge.updated.emit
     if overlay:
         overlay.set_polish_callback(engine.polish)
         overlay.set_send_callback(engine.send)
@@ -525,6 +545,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
         main_win.show()
         main_win.raise_()
         main_win.activateWindow()
+        history_bridge.updated.connect(
+            main_win.refresh_history, Qt.ConnectionType.QueuedConnection)
     except Exception as e:
         log.warning("Failed to build main window: %s", e)
         main_win = None

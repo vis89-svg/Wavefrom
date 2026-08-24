@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
@@ -38,11 +38,20 @@ def _make_icon(color_hex: str = "#787878") -> QIcon:
     return QIcon(pixmap)
 
 
-class TrayIcon:
-    """Qt system-tray icon.  Create on the main thread before app.exec()."""
+class TrayIcon(QObject):
+    """Qt system-tray icon.  Create on the main thread before app.exec().
+
+    `set_state()` is called from DictationEngine's background worker thread,
+    so it only emits a signal here -- the actual QSystemTrayIcon/QPixmap work
+    happens on the GUI thread via the queued connection below.
+    """
+
+    _sig_set_state = Signal(str)
 
     def __init__(self, on_quit=None, on_remap=None, on_settings=None,
                  on_show=None):
+        super().__init__()
+        self._sig_set_state.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._tray = QSystemTrayIcon()
         self._tray.setIcon(_make_icon())
         self._tray.setToolTip("Dictation \u2014 idle")
@@ -73,6 +82,9 @@ class TrayIcon:
         self._tray.show()
 
     def set_state(self, state: str) -> None:
+        self._sig_set_state.emit(state)
+
+    def _apply_state(self, state: str) -> None:
         color = STATE_COLORS.get(state, "#787878")
         self._tray.setIcon(_make_icon(color))
         self._tray.setToolTip(f"Dictation \u2014 {state}")

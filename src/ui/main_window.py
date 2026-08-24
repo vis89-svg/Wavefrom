@@ -116,6 +116,8 @@ class MainWindow(QMainWindow):
             if b is not btn:
                 b.setChecked(False)
         self._stack.setCurrentWidget(page)
+        if hasattr(page, "refresh"):
+            page.refresh()
 
     def closeEvent(self, event: QEvent) -> None:
         """Hide to tray instead of quitting — app keeps running in tray."""

@@ -77,6 +77,7 @@ class DictationEngine:
         self._local = local_engine
         self._overlay = overlay
         self._history = history
+        self.on_history_update = None
 
         self._slice_q: queue.Queue[bytes | None] = queue.Queue()
         self._committed: list[str] = []
@@ -441,6 +442,20 @@ class DictationEngine:
         with self._lock:
             raw = " ".join(self._committed)
             typed = self._typed_text
+        try:
+            self._finalize_impl(wav_bytes, raw, typed)
+        except Exception as e:
+            # Guarantees the overlay/tray never get orphaned mid-state (e.g.
+            # stuck on "Cleaning...") if something unexpected throws partway
+            # through finalize — _worker_loop's finally already clears _busy
+            # either way, so there's nothing to gain from letting this
+            # propagate further than a log line.
+            log.exception("Finalize failed unexpectedly: %s", e)
+            self._status.state = "idle"
+            self._overlay_state("idle")
+            self._notify_tray()
+
+    def _finalize_impl(self, wav_bytes: bytes | None, raw: str, typed: str) -> None:
         # Collapse loops/echoes in the streaming text before it is typed, so
         # whatever gets typed first is already as clean as possible.
         raw = strip_trailing_repeat(collapse_adjacent_repeats(raw))
@@ -582,6 +597,7 @@ class DictationEngine:
 
         if not final.strip():
             self._status.state = "idle"
+            self._overlay_state("idle")
             self._notify_tray()
             return
         if final[-1] not in PUNCT:
@@ -675,6 +691,11 @@ class DictationEngine:
                 self._history.record(final)
             except Exception as e:
                 log.debug("History record failed: %s", e)
+            if self.on_history_update:
+                try:
+                    self.on_history_update()
+                except Exception as e:
+                    log.debug("History-update callback failed: %s", e)
 
     def polish(self) -> str | None:
         """On-demand polish of the finalized text (overlay "Polish" button).
