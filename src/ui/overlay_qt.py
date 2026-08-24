@@ -1,0 +1,585 @@
+"""Floating live indicator: waveform + state + review panel (PySide6).
+
+A small always-on-top, click-through window that appears near the cursor while
+dictating, showing the mic level as animated bars, the current pipeline state
+(Recording / Transcribing / Cleaning up / Done), and the final cleaned text in
+a review panel.  Mirrors the "Flow Bar" of modern dictation apps.
+
+Rebuilt in PySide6 to unlock rounded corners, drop shadows, custom-painted
+waveform, and QSS-styled buttons -- none of which Tkinter supports.
+"""
+from __future__ import annotations
+
+import ctypes
+import logging
+import threading
+import time
+
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtWidgets import (
+    QApplication,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+log = logging.getLogger(__name__)
+
+# ── Win32 constants (same as the old Tk overlay) ──────────────────────────────
+_GWL_EXSTYLE = -20
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_TOOLWINDOW = 0x00000080
+_WS_EX_NOACTIVATE = 0x08000000
+_SPI_GETWORKAREA = 0x0030
+
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+# ── State helpers ─────────────────────────────────────────────────────────────
+_STATE_LABELS = {
+    "recording": "Recording\u2026",
+    "transcribing": "Transcribing\u2026",
+    "cleaning": "Cleaning up\u2026",
+    "done": "Done",
+    "error": "Error",
+    "idle": "Idle",
+}
+
+_STATE_COLORS = {
+    "recording": "#e5484d",
+    "transcribing": "#f5a623",
+    "cleaning": "#4a90d9",
+    "done": "#30a46c",
+    "error": "#e5484d",
+    "idle": "#8a8f98",
+}
+
+_ANIM_MS = 40
+_LEVEL_DECAY = 0.85
+_BAR_COUNT = 14
+_OFFSET_X = 18
+_OFFSET_Y = 26
+_PREVIEW_CHARS = 500
+
+
+# ── Win32 helpers ─────────────────────────────────────────────────────────────
+def _work_area() -> tuple[int, int, int, int] | None:
+    rect = _RECT()
+    if _user32.SystemParametersInfoW(_SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+        return rect.left, rect.top, rect.right, rect.bottom
+    return None
+
+
+def _cursor_pos() -> tuple[int, int]:
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    pt = POINT()
+    if _user32.GetCursorPos(ctypes.byref(pt)):
+        return pt.x, pt.y
+    return 0, 0
+
+
+def _clamp_pos(
+    x: int, y: int, w: int, h: int,
+    left: int, top: int, right: int, bottom: int,
+    gap: int = 14, margin: int = 8,
+    offset_x: int = _OFFSET_X, offset_y: int = _OFFSET_Y,
+) -> tuple[int, int]:
+    px = min(max(x + offset_x, left + margin), max(right - w - margin, left + margin))
+    py = y - h - gap
+    if py < top + margin:
+        py = y + offset_y
+    py = min(max(py, top + margin), max(bottom - h - margin, top + margin))
+    return px, py
+
+
+def _set_window_ex_style(hwnd: int, interactive: bool) -> None:
+    """Apply WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, and
+    toggle WS_EX_TRANSPARENT on/off for click-through."""
+    try:
+        SetWindowLongPtrW = _user32.SetWindowLongPtrW
+        style = SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, 0)
+        if not style:
+            return
+        if interactive:
+            style = style & ~_WS_EX_TRANSPARENT
+        else:
+            style = style | _WS_EX_TRANSPARENT
+        SetWindowLongPtrW(
+            hwnd, _GWL_EXSTYLE,
+            style | _WS_EX_LAYERED | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE,
+        )
+    except Exception as e:
+        log.debug("Click-through toggle failed: %s", e)
+
+
+# ── Waveform bar widget ──────────────────────────────────────────────────────
+class WaveformBars(QWidget):
+    """Custom-painted level bars driven by the engine's set_level(db) feed."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._levels: list[float] = [0.0] * _BAR_COUNT
+        self._t0 = time.monotonic()
+        self.setMinimumHeight(34)
+        self.setMinimumWidth(200)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def push_level(self, db: float) -> None:
+        self._levels.append(float(db))
+        if len(self._levels) > _BAR_COUNT:
+            self._levels = self._levels[-_BAR_COUNT:]
+
+    def tick_decay(self) -> None:
+        self._levels = [v * _LEVEL_DECAY for v in self._levels]
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        h = self.height()
+        p.fillRect(0, 0, w, h, QColor("#181c21"))
+
+        bw = max((w - (_BAR_COUNT - 1) * 3) / _BAR_COUNT, 4)
+        pulse = 0.75 + 0.25 * ((time.monotonic() - self._t0) % 0.9 / 0.9)
+
+        for i, db in enumerate(self._levels):
+            frac = max(0.0, min(1.0, (db + 70.0) / 60.0))
+            bar_h = max(2.0, frac * (h - 4)) * pulse
+            x0 = i * (bw + 3)
+            color = QColor(_STATE_COLORS.get("recording", "#30a46c"))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(color))
+            p.drawRoundedRect(QRectF(x0, h - bar_h, bw, bar_h - 1), 2, 2)
+
+
+# ── Styles ────────────────────────────────────────────────────────────────────
+_PILL_STYLE = """
+QWidget#pill {
+    background-color: #20242a;
+    border: 1px solid #3a4048;
+    border-radius: 18px;
+}
+"""
+_BTN_BASE = (
+    "QPushButton {{ "
+    "  background: {bg}; color: #fff; border: none; border-radius: 6px; "
+    "  padding: 0 {pad}px; font: 11px 'Segoe UI'; "
+    "}}"
+    "QPushButton:hover {{ background: {hover}; }}"
+    "QPushButton:disabled {{ background: #3a3f48; color: #777; }}"
+)
+_BTN_STOP = _BTN_BASE.format(bg="#e5484d", hover="#ff5b60", pad=12)
+_BTN_POLISH = _BTN_BASE.format(bg="#4a90d9", hover="#5ba0e0", pad=14)
+_BTN_SEND = _BTN_BASE.format(bg="#5090d0", hover="#60a0e0", pad=14)
+_BTN_CLIP = _BTN_BASE.format(bg="#5090d0", hover="#60a0e0", pad=12)
+_BTN_CLOSE = (
+    "QPushButton { background: #3a4048; color: #d7dbe0; border: none; "
+    "  border-radius: 6px; padding: 0 10px; font: 11px 'Segoe UI'; }"
+    "QPushButton:hover { background: #e5484d; color: #fff; }"
+)
+
+_REVIEW_STYLE = """
+QWidget#review {
+    background-color: #20242a;
+    border: 1px solid #3a4048;
+    border-radius: 14px;
+}
+QTextEdit {
+    background: #181c21; color: #e6e9ee; border: none;
+    border-radius: 6px; padding: 6px; font: 10px 'Segoe UI';
+}
+"""
+
+
+# ── Main overlay widget ──────────────────────────────────────────────────────
+class OverlayWindow(QWidget):
+    """Thread-safe overlay.  All Qt work happens on the main/GUI thread.
+
+    Two visual modes:
+      - live indicator (recording/transcribing/cleaning): click-through pill
+        with animated waveform near the cursor.
+      - review panel ("done"): full cleaned text with Polish / Send /
+        Clipboard / X buttons.  Interactive (no click-through).
+    """
+
+    # Signals emitted from background threads, processed on the GUI thread
+    _sig_state = Signal(str, str)
+    _sig_level = Signal(float)
+    _sig_polish_result = Signal(object)
+    _sig_send_result = Signal(object)
+    _sig_clipboard_result = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self._visible = False
+        self._polishing = False
+        self._panel_shown = False
+
+        self._polish_callback = None
+        self._send_callback = None
+        self._clipboard_callback = None
+        self._stop_callback = None
+
+        self._build_ui()
+        self._connect_signals()
+
+    # ── UI construction ──────────────────────────────────────────────────
+    def _build_ui(self) -> None:
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+        # ── Pill container (live view) ───────────────────────────────────
+        self._pill = QWidget(self)
+        self._pill.setObjectName("pill")
+        self._pill.setStyleSheet(_PILL_STYLE)
+        pill_lay = QVBoxLayout(self._pill)
+        pill_lay.setContentsMargins(14, 8, 14, 8)
+
+        # Header row: dot + state label + stop button
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        self._dot = QLabel("\u25cf")
+        self._dot.setFixedWidth(14)
+        self._dot.setStyleSheet("color: #8a8f98; font: 12px 'Segoe UI';")
+        head.addWidget(self._dot)
+
+        self._state_lbl = QLabel("Idle")
+        self._state_lbl.setStyleSheet(
+            "color: #d7dbe0; font: 11px 'Segoe UI'; font-weight: bold;"
+        )
+        head.addWidget(self._state_lbl)
+        head.addStretch()
+
+        self._stop_btn = QPushButton("\u25a0 Stop")
+        self._stop_btn.setObjectName("stopBtn")
+        self._stop_btn.setStyleSheet(_BTN_STOP)
+        self._stop_btn.setFixedHeight(26)
+        self._stop_btn.clicked.connect(self._on_stop)
+        self._stop_btn.hide()
+        head.addWidget(self._stop_btn)
+        pill_lay.addLayout(head)
+
+        # Waveform
+        self._waveform = WaveformBars(self._pill)
+        pill_lay.addWidget(self._waveform)
+
+        # ── Review container (done view) ─────────────────────────────────
+        self._review = QWidget(self)
+        self._review.setObjectName("review")
+        self._review.setStyleSheet(_REVIEW_STYLE)
+        rev_lay = QVBoxLayout(self._review)
+        rev_lay.setContentsMargins(10, 8, 10, 8)
+
+        self._txt = QTextEdit()
+        self._txt.setReadOnly(True)
+        self._txt.setMinimumHeight(120)
+        self._txt.setMaximumHeight(200)
+        rev_lay.addWidget(self._txt)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(6)
+
+        self._polish_btn = QPushButton("Polish")
+        self._polish_btn.setStyleSheet(_BTN_POLISH)
+        self._polish_btn.setFixedHeight(28)
+        self._polish_btn.clicked.connect(self._on_polish)
+        btn_row.addWidget(self._polish_btn)
+
+        self._send_btn = QPushButton("Send")
+        self._send_btn.setStyleSheet(_BTN_SEND)
+        self._send_btn.setFixedHeight(28)
+        self._send_btn.clicked.connect(self._on_send)
+        btn_row.addWidget(self._send_btn)
+
+        self._clip_btn = QPushButton("Clipboard")
+        self._clip_btn.setStyleSheet(_BTN_CLIP)
+        self._clip_btn.setFixedHeight(28)
+        self._clip_btn.clicked.connect(self._on_clipboard)
+        btn_row.addWidget(self._clip_btn)
+
+        btn_row.addStretch()
+
+        self._close_btn = QPushButton("X")
+        self._close_btn.setStyleSheet(_BTN_CLOSE)
+        self._close_btn.setFixedHeight(28)
+        self._close_btn.setFixedWidth(36)
+        self._close_btn.clicked.connect(self._on_close)
+        btn_row.addWidget(self._close_btn)
+
+        rev_lay.addLayout(btn_row)
+
+        # Initially show pill, hide review
+        self._pill.show()
+        self._review.hide()
+
+        # Shadow
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(0, 0, 0, 140))
+        self.setGraphicsEffect(shadow)
+
+    def _connect_signals(self) -> None:
+        self._sig_state.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
+        self._sig_level.connect(self._on_level, Qt.ConnectionType.QueuedConnection)
+        self._sig_polish_result.connect(
+            self._apply_polish_result, Qt.ConnectionType.QueuedConnection
+        )
+        self._sig_send_result.connect(
+            self._apply_send_result, Qt.ConnectionType.QueuedConnection
+        )
+        self._sig_clipboard_result.connect(
+            self._apply_clipboard_result, Qt.ConnectionType.QueuedConnection
+        )
+
+    # ── Public API (called from ANY thread) ─────────────────────────────
+    def set_state(self, state: str, text: str = "") -> None:
+        self._sig_state.emit(state, text)
+
+    def set_level(self, db: float) -> None:
+        self._sig_level.emit(float(db))
+
+    def set_polish_callback(self, callback) -> None:
+        self._polish_callback = callback
+
+    def set_send_callback(self, callback) -> None:
+        self._send_callback = callback
+
+    def set_clipboard_callback(self, callback) -> None:
+        self._clipboard_callback = callback
+
+    def set_stop_callback(self, callback) -> None:
+        self._stop_callback = callback
+
+    def start(self) -> None:
+        self.show()
+        self._visible = False  # will be shown by _apply_state
+
+    def stop(self) -> None:
+        self.hide()
+
+    # ── Click-through ───────────────────────────────────────────────────
+    def _set_interactive(self, interactive: bool) -> None:
+        hwnd = int(self.winId())
+        _set_window_ex_style(hwnd, interactive)
+
+    def _make_click_through(self) -> None:
+        self._set_interactive(False)
+
+    # ── State handling (runs on GUI thread via signal) ──────────────────
+    def _apply_state(self, state: str, text: str) -> None:
+        if state == "idle":
+            if self._visible:
+                self.hide()
+                self._visible = False
+            return
+        if not self._visible:
+            self._place_near_cursor()
+            self.show()
+            self._visible = True
+
+        color = _STATE_COLORS.get(state, "#8a8f98")
+        self._dot.setStyleSheet(f"color: {color}; font: 12px 'Segoe UI';")
+        self._state_lbl.setText(_STATE_LABELS.get(state, state))
+        self._state_lbl.setStyleSheet(
+            f"color: {color}; font: 11px 'Segoe UI'; font-weight: bold;"
+        )
+        if state == "done":
+            self._show_panel(text)
+        else:
+            self._show_live(state, text)
+
+    def _show_live(self, state: str, text: str) -> None:
+        if self._panel_shown:
+            self._review.hide()
+            self._panel_shown = False
+            self._pill.show()
+
+        if state == "recording":
+            self._set_interactive(True)
+            self._stop_btn.show()
+        else:
+            self._make_click_through()
+            self._stop_btn.hide()
+
+    def _show_panel(self, text: str) -> None:
+        if not self._panel_shown:
+            self._pill.hide()
+            self._review.show()
+            self._panel_shown = True
+
+        self._txt.setPlainText((text or "").strip())
+        self._polishing = False
+        self._polish_btn.setEnabled(True)
+        self._polish_btn.setText("Polish")
+        self._send_btn.setEnabled(True)
+        self._send_btn.setText("Send")
+        self._place_review_panel()
+        self._set_interactive(True)
+
+    # ── Result handlers (GUI thread) ────────────────────────────────────
+    def _apply_polish_result(self, result) -> None:
+        self._polishing = False
+        if result:
+            self._polish_btn.setEnabled(True)
+            self._polish_btn.setText("Polish")
+            self._txt.setPlainText((result or "").strip())
+            self._state_lbl.setText("Polished")
+            self._state_lbl.setStyleSheet(
+                f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+            self._send_btn.setEnabled(True)
+        else:
+            self._polish_btn.setEnabled(True)
+            self._polish_btn.setText("Polish")
+            self._state_lbl.setText("Polish failed")
+            self._state_lbl.setStyleSheet(
+                "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+
+    def _apply_send_result(self, text: str | None) -> None:
+        self._polishing = False
+        if text:
+            self._state_lbl.setText("Sent")
+            self._state_lbl.setStyleSheet(
+                f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+        else:
+            self._state_lbl.setText("No polished text")
+            self._state_lbl.setStyleSheet(
+                "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+        self._send_btn.setEnabled(True)
+        self._send_btn.setText("Send")
+        if self._panel_shown:
+            self._txt.setPlainText((text or "").strip())
+
+    def _apply_clipboard_result(self, text: str | None) -> None:
+        self._polishing = False
+        if text:
+            self._state_lbl.setText("Copied")
+            self._state_lbl.setStyleSheet(
+                f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+        else:
+            self._state_lbl.setText("No polished text")
+            self._state_lbl.setStyleSheet(
+                "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+
+    # ── Level feed (GUI thread) ─────────────────────────────────────────
+    def _on_level(self, db: float) -> None:
+        self._waveform.push_level(db)
+        self._waveform.tick_decay()
+
+    # ── Button handlers ─────────────────────────────────────────────────
+    def _on_polish(self) -> None:
+        if self._polishing or self._polish_callback is None:
+            return
+        self._polishing = True
+        self._polish_btn.setEnabled(False)
+        self._polish_btn.setText("Polishing\u2026")
+        threading.Thread(target=self._run_polish, daemon=True, name="overlay-polish").start()
+
+    def _run_polish(self) -> None:
+        try:
+            result = self._polish_callback()
+        except Exception as e:
+            log.warning("Polish pass failed: %s", e)
+            result = None
+        self._sig_polish_result.emit(result)
+
+    def _on_send(self) -> None:
+        if self._polishing or self._send_callback is None:
+            return
+        self._polishing = True
+        self._send_btn.setEnabled(False)
+        self._send_btn.setText("Sending\u2026")
+        threading.Thread(target=self._run_send, daemon=True, name="overlay-send").start()
+
+    def _run_send(self) -> None:
+        try:
+            result = self._send_callback()
+        except Exception as e:
+            log.warning("Send pass failed: %s", e)
+            result = None
+        self._sig_send_result.emit(result)
+
+    def _on_clipboard(self) -> None:
+        if self._polishing or self._clipboard_callback is None:
+            return
+        self._polishing = True
+        threading.Thread(
+            target=self._run_clipboard, daemon=True, name="overlay-clipboard"
+        ).start()
+
+    def _run_clipboard(self) -> None:
+        try:
+            result = self._clipboard_callback()
+        except Exception as e:
+            log.warning("Clipboard pass failed: %s", e)
+            result = None
+        self._sig_clipboard_result.emit(result)
+
+    def _on_stop(self) -> None:
+        if self._stop_callback is None:
+            return
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.setText("Stopping\u2026")
+        threading.Thread(target=self._stop_callback, daemon=True, name="overlay-stop").start()
+
+    def _on_close(self) -> None:
+        self.hide()
+        self._visible = False
+
+    # ── Placement ────────────────────────────────────────────────────────
+    def _place_near_cursor(self) -> None:
+        x, y = _cursor_pos()
+        self.adjustSize()
+        w, h = self.sizeHint().width(), self.sizeHint().height()
+        area = _work_area()
+        if area:
+            left, top, right, bottom = area
+        else:
+            scr = QApplication.primaryScreen().virtualGeometry()
+            left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
+        px, py = _clamp_pos(x, y, w, h, left, top, right, bottom)
+        self.move(px, py)
+
+    def _place_review_panel(self) -> None:
+        x, y = _cursor_pos()
+        self.adjustSize()
+        w, h = self.sizeHint().width(), self.sizeHint().height()
+        area = _work_area()
+        if area:
+            left, top, right, bottom = area
+        else:
+            scr = QApplication.primaryScreen().virtualGeometry()
+            left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
+        px, py = _clamp_pos(x, y, w, h, left, top, right, bottom)
+        self.move(px, py)

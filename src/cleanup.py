@@ -204,21 +204,37 @@ class CleanupClient:
         """On-demand sentence-structure + grammar polish of an already-cleaned
         transcript. Uses the dedicated POLISH_PROMPT regardless of the mode the
         client was constructed with. `model` overrides the client's model for
-        this call (used for a stronger polish model)."""
+        this call (used for a stronger polish model).
+
+        Wrapped in a 90s concurrent.futures timeout so the caller is never
+        stuck waiting forever if the SDK's HTTP-level timeout doesn't fire
+        (e.g. the LLM inference is slow but the connection stays alive).
+        """
         if not transcript.strip():
             return transcript
         hint = _app_tone_line(app_hint) if app_hint else ""
         prompt = POLISH_PROMPT + _glossary_line(self.glossary) \
             + _correction_map_line(self.correction_map)
-        response = self._client.chat.completions.create(
-            model=model or self._model,
-            messages=[
-                {"role": "system", "content": prompt + hint},
-                {"role": "user", "content": transcript},
-            ],
-            temperature=0.2,
-            timeout=60,
-        )
+        import concurrent.futures
+        def _call():
+            return self._client.chat.completions.create(
+                model=model or self._model,
+                messages=[
+                    {"role": "system", "content": prompt + hint},
+                    {"role": "user", "content": transcript},
+                ],
+                temperature=0.2,
+                timeout=60,
+            )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_call)
+            try:
+                response = future.result(timeout=90)
+            except concurrent.futures.TimeoutError:
+                log.warning("Polish API call timed out after 90s")
+                raise TimeoutError("Polish LLM call exceeded 90 seconds")
+            except Exception:
+                raise
         return response.choices[0].message.content or transcript
 
     def reconcile(self, disputes: list) -> dict[int, str]:

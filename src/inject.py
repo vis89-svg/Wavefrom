@@ -197,10 +197,35 @@ def _type_char(ch: str) -> None:
         time.sleep(CHAR_DELAY_SECS)
 
 
+_target_hwnd: int = 0  # set by engine before typing; restore focus here
+
+
+def set_target_hwnd(hwnd: int) -> None:
+    global _target_hwnd
+    _target_hwnd = hwnd
+
+
+def _restore_foreground() -> None:
+    """Bring the target app back to foreground before injecting keystrokes.
+
+    When the user presses the dictation hotkey, the keyboard hook suppresses
+    the keystrokes and may leave focus on the wrong window (the overlay, the
+    tray, etc.).  This ensures SendInput goes to the actual target app.
+    """
+    if _target_hwnd:
+        try:
+            cur = user32.GetForegroundWindow()
+            if cur != _target_hwnd:
+                user32.SetForegroundWindow(_target_hwnd)
+        except Exception:
+            pass
+
+
 def inject_text(text: str) -> None:
     """Type `text` into the currently focused window."""
     if not text:
         return
+    _restore_foreground()
     for ch in text:
         if ch == "\n":
             _send_key(VK_RETURN, False)
@@ -223,6 +248,7 @@ def paste_text(text: str) -> None:
     """
     if not text:
         return
+    _restore_foreground()
     try:
         import pyperclip
     except ImportError:
@@ -264,6 +290,7 @@ class TextInjector:
 
 def delete_chars(n: int) -> None:
     """Press Backspace `n` times (deletes characters left of the caret)."""
+    _restore_foreground()
     for _ in range(max(0, n)):
         _send_key(VK_BACK, False)
         _send_key(VK_BACK, True)

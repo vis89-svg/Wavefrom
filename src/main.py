@@ -31,7 +31,7 @@ from src.single_instance import acquire as acquire_mutex
 from src.streaming import DictationEngine
 from src.transcribe import TranscriptionClient
 from src.ui.settings_dialog import show_settings_dialog
-from src.ui.tray import TrayIcon
+from src.ui.tray_qt import TrayIcon
 from src.version import APP_ID, APP_NAME, VERSION
 
 LOGS_DIR.mkdir(exist_ok=True)
@@ -109,7 +109,17 @@ def _cmd_dictate(args: argparse.Namespace) -> int:
             log.error("Setup cancelled — cannot run without an API key.")
             return 1
 
-    return _run_app(settings, api_key, inject=not args.no_inject)
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    from src.ui.login_window import show_login
+    authenticated, display_name = show_login()
+    if not authenticated:
+        log.info("Login cancelled or failed; exiting.")
+        return 0
+    log.info("Logged in as %s", display_name)
+
+    return _run_app(settings, api_key, inject=not args.no_inject, app=app)
 
 
 # ------------------------------------------------------------------- app
@@ -373,36 +383,44 @@ class HotkeyController:
         self._unregister()
 
 
-def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
+def _run_app(settings: Settings, api_key: str, inject: bool = True,
+             app=None) -> int:
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    if app is None:
+        app = QApplication.instance() or QApplication(sys.argv)
+
     log.info("Starting pipeline...")
     transcriber, cleaner, injector = _build_pipeline(settings, api_key, inject)
     if transcriber is None:
         return 1
     log.info("Pipeline ready; building engine...")
 
+    import src.history as history_mod
+
     overlay = None
     if settings.overlay:
-        from src.ui.overlay import OverlayWindow
-        overlay = OverlayWindow()
+        from src.ui.overlay_qt import OverlayWindow as QtOverlayWindow
+        overlay = QtOverlayWindow()
         overlay.start()
 
     engine = DictationEngine(
         settings, transcriber, cleaner=cleaner, injector=injector,
         notify=toast_win if settings.toasts else None,
-        overlay=overlay,
+        overlay=overlay, history=history_mod,
     )
     if overlay:
         overlay.set_polish_callback(engine.polish)
         overlay.set_send_callback(engine.send)
         overlay.set_clipboard_callback(engine.copy_to_clipboard)
         overlay.set_stop_callback(engine.stop)
-    running = {"v": True}
     capture_state = {"on": False}
     tray = None
     current_settings = {"hotkey": settings.hotkey, "live_hotkey": settings.live_hotkey}
 
     def on_quit() -> None:
-        running["v"] = False
+        app.quit()
 
     def on_open_settings() -> None:
         s = load_settings()
@@ -414,10 +432,6 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
         hold_hotkey.set_hotkey(new_settings.hotkey)
         live_hotkey.set_hotkey(new_settings.live_hotkey)
         engine.set_cleaner_mode(bool(new_settings.cleanup_model))
-        # engine._config IS this `settings` object — without copying every
-        # field over, the running engine keeps deciding things (verify,
-        # domain_hint, ...) from stale values until the app is restarted, even
-        # though the hotkey controllers and settings.json already moved on.
         for f in fields(Settings):
             setattr(settings, f.name, getattr(new_settings, f.name))
         apply_autostart(new_settings)
@@ -462,16 +476,10 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
             log.debug("Ignoring press while engine is busy finalizing")
             capture_state["on"] = False
             return
-        # Event-driven "combo held" flag (not GetAsyncKeyState, which can stay
-        # stuck "down" on the Win key): drives slice-typing deferral for the
-        # whole recording.
         engine.set_hold_active(True)
         threading.Thread(target=_capture_thread, daemon=True).start()
 
     def on_release_hold() -> None:
-        # Clear the flag first: the finalize thread reads it to decide whether
-        # it can type immediately. The event key-up always arrives, so this
-        # clears instantly even if the physical Win key is stuck "down".
         engine.set_hold_active(False)
         engine.stop()
 
@@ -484,15 +492,8 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
             log.debug("Ignoring press while engine is busy finalizing")
             capture_state["on"] = False
             return
-        # Tap-style: no modifier is held during recording, so live slice
-        # typing is safe immediately; capture() auto-stops on silence.
         threading.Thread(target=_capture_thread, daemon=True).start()
 
-    # Two independent, fixed-purpose hotkeys instead of one hotkey plus a
-    # runtime mode toggle — each controller is created once and never has its
-    # mode changed, which avoids the class of bug where tearing down one
-    # registration type (add_hotkey) and standing up another (hook) at
-    # runtime left the old one still active internally.
     hold_hotkey = HotkeyController("hold", current_settings["hotkey"],
                                    on_press_hold, on_release_hold)
     live_hotkey = HotkeyController("tap", current_settings["live_hotkey"],
@@ -504,12 +505,22 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
                  f"Ready. Hold {current_settings['hotkey']} or tap "
                  f"{current_settings['live_hotkey']} for live typing.")
 
+    # Main app shell window (History + Settings pages)
+    main_win = None
     try:
-        while running["v"]:
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        pass
-    finally:
+        from src.ui.history_page import HistoryPage
+        from src.ui.settings_page import SettingsPage
+        from src.ui.main_window import MainWindow
+        hist_page = HistoryPage()
+        settings_page = SettingsPage(settings, on_save=on_settings_saved)
+        main_win = MainWindow(hist_page, settings_page)
+        main_win.show()
+    except Exception as e:
+        log.warning("Failed to build main window: %s", e)
+        main_win = None
+
+    # Graceful shutdown on app quit
+    def _cleanup() -> None:
         hold_hotkey.stop()
         live_hotkey.stop()
         engine.stop()
@@ -517,6 +528,15 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True) -> int:
             tray.stop()
         if overlay:
             overlay.stop()
+        if main_win:
+            main_win.close()
+
+    app.aboutToQuit.connect(_cleanup)
+
+    try:
+        app.exec()
+    except KeyboardInterrupt:
+        pass
     log.info("Exited.")
     return 0
 

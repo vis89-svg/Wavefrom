@@ -66,7 +66,8 @@ class EngineStatus:
 
 class DictationEngine:
     def __init__(self, config, transcriber, cleaner=None, injector=None,
-                 notify=None, tray=None, local_engine=None, overlay=None):
+                 notify=None, tray=None, local_engine=None, overlay=None,
+                 history=None):
         self._config = config
         self._transcriber = transcriber
         self._cleaner = cleaner
@@ -75,6 +76,7 @@ class DictationEngine:
         self._tray = tray
         self._local = local_engine
         self._overlay = overlay
+        self._history = history
 
         self._slice_q: queue.Queue[bytes | None] = queue.Queue()
         self._committed: list[str] = []
@@ -124,6 +126,11 @@ class DictationEngine:
         # _typed_text — which previously let the final diff backspace far
         # beyond this dictation's own text.
         self._hold_active = self._mode == "hold"
+        # Save the foreground window so inject_text/paste_text can restore
+        # focus to the target app before typing (the keyboard hook may leave
+        # focus on the overlay or tray).
+        from src.inject import set_target_hwnd, foreground_window_handle
+        set_target_hwnd(foreground_window_handle())
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
         return True
@@ -663,6 +670,11 @@ class DictationEngine:
         self._overlay_state("done", final)
         self._notify_tray()
         log.info("Dictation finalized: %r", final)
+        if self._history is not None and final.strip():
+            try:
+                self._history.record(final)
+            except Exception as e:
+                log.debug("History record failed: %s", e)
 
     def polish(self) -> str | None:
         """On-demand polish of the finalized text (overlay "Polish" button).
