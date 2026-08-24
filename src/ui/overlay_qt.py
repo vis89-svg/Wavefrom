@@ -610,7 +610,11 @@ class OverlayWindow(QWidget):
 
     # ── Placement ────────────────────────────────────────────────────────
     def _place_near_cursor(self) -> None:
-        x, y = _cursor_pos()
+        """Place the overlay at the bottom-center of the screen (Wispr Flow style).
+
+        Unlike following the cursor, this gives a consistent, predictable
+        position — the user always knows where to look.
+        """
         self.adjustSize()
         w, h = self.sizeHint().width(), self.sizeHint().height()
         area = _work_area()
@@ -619,11 +623,14 @@ class OverlayWindow(QWidget):
         else:
             scr = QApplication.primaryScreen().virtualGeometry()
             left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
-        px, py = _clamp_pos(x, y, w, h, left, top, right, bottom)
+        # Center horizontally, pin to bottom with a margin
+        margin = 24
+        px = left + (right - left - w) // 2
+        py = bottom - h - margin
         self.move(px, py)
 
     def _place_review_panel(self) -> None:
-        x, y = _cursor_pos()
+        """Place the review panel at the bottom-center (same as live pill)."""
         self.adjustSize()
         w, h = self.sizeHint().width(), self.sizeHint().height()
         area = _work_area()
@@ -632,5 +639,7 @@ class OverlayWindow(QWidget):
         else:
             scr = QApplication.primaryScreen().virtualGeometry()
             left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
-        px, py = _clamp_pos(x, y, w, h, left, top, right, bottom)
+        margin = 24
+        px = left + (right - left - w) // 2
+        py = bottom - h - margin
         self.move(px, py)
