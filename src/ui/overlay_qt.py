@@ -434,6 +434,7 @@ class OverlayWindow(QWidget):
         if not self._visible:
             self._place_near_cursor()
             self.show()
+            self.raise_()
             self._visible = True
 
         color = _STATE_COLORS.get(state, "#8a8f98")
@@ -474,6 +475,7 @@ class OverlayWindow(QWidget):
         self._send_btn.setEnabled(True)
         self._send_btn.setText("Send")
         self._place_review_panel()
+        self.raise_()
         self._set_interactive(True)
         self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
@@ -617,29 +619,40 @@ class OverlayWindow(QWidget):
         """
         self.adjustSize()
         w, h = self.sizeHint().width(), self.sizeHint().height()
+        if w < 100:
+            w = 420
+        if h < 40:
+            h = 120
         area = _work_area()
         if area:
             left, top, right, bottom = area
         else:
             scr = QApplication.primaryScreen().virtualGeometry()
             left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
-        # Center horizontally, pin to bottom with a margin
-        margin = 24
+        margin = 80
         px = left + (right - left - w) // 2
         py = bottom - h - margin
+        if py < top:
+            py = top + margin
         self.move(px, py)
 
     def _place_review_panel(self) -> None:
         """Place the review panel at the bottom-center (same as live pill)."""
         self.adjustSize()
         w, h = self.sizeHint().width(), self.sizeHint().height()
+        if w < 100:
+            w = 420
+        if h < 40:
+            h = 200
         area = _work_area()
         if area:
             left, top, right, bottom = area
         else:
             scr = QApplication.primaryScreen().virtualGeometry()
             left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
-        margin = 24
+        margin = 80
         px = left + (right - left - w) // 2
         py = bottom - h - margin
+        if py < top:
+            py = top + margin
         self.move(px, py)
