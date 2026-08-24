@@ -406,8 +406,12 @@ class OverlayWindow(QWidget):
         self._hotkey_lbl_review.setText(text)
 
     def start(self) -> None:
-        self.show()
-        self._visible = False  # will be shown by _apply_state
+        # Stay hidden until the first real dictation state comes in via
+        # set_state() -- _apply_state() shows the window itself at that
+        # point. Showing here unconditionally would flash an empty "Idle"
+        # pill at (0, 0) the instant the app launches, before any hotkey
+        # is ever pressed.
+        self._visible = False
 
     def stop(self) -> None:
         self.hide()

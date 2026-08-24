@@ -1,3 +1,11 @@
 node_modules
 .env
 *.log
+build/
+dist/
+__pycache__/
+*.pyc
+credentials.json
+history.db
+settings.json
+*.spec.bak
