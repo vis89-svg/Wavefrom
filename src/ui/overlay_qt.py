@@ -38,6 +38,10 @@ _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_NOACTIVATE = 0x08000000
 _SPI_GETWORKAREA = 0x0030
+_HWND_TOPMOST = -1
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_SHOWWINDOW = 0x0040
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
@@ -115,18 +119,15 @@ def _set_window_ex_style(hwnd: int, interactive: bool) -> None:
     """Apply WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, and
     toggle WS_EX_TRANSPARENT on/off for click-through."""
     try:
+        GetWindowLongPtrW = _user32.GetWindowLongPtrW
         SetWindowLongPtrW = _user32.SetWindowLongPtrW
-        style = SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, 0)
-        if not style:
-            return
+        style = GetWindowLongPtrW(hwnd, _GWL_EXSTYLE)
         if interactive:
             style = style & ~_WS_EX_TRANSPARENT
         else:
             style = style | _WS_EX_TRANSPARENT
-        SetWindowLongPtrW(
-            hwnd, _GWL_EXSTYLE,
-            style | _WS_EX_LAYERED | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE,
-        )
+        new_style = style | _WS_EX_LAYERED | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE
+        SetWindowLongPtrW(hwnd, _GWL_EXSTYLE, new_style)
     except Exception as e:
         log.debug("Click-through toggle failed: %s", e)
 
@@ -435,6 +436,7 @@ class OverlayWindow(QWidget):
             self._place_near_cursor()
             self.show()
             self.raise_()
+            self._force_topmost()
             self._visible = True
 
         color = _STATE_COLORS.get(state, "#8a8f98")
@@ -454,6 +456,7 @@ class OverlayWindow(QWidget):
             self._review.hide()
             self._panel_shown = False
             self._pill.show()
+            self._force_topmost()
 
         if state == "recording":
             self._set_interactive(True)
@@ -476,6 +479,7 @@ class OverlayWindow(QWidget):
         self._send_btn.setText("Send")
         self._place_review_panel()
         self.raise_()
+        self._force_topmost()
         self._set_interactive(True)
         self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
@@ -609,6 +613,18 @@ class OverlayWindow(QWidget):
         self.hide()
         self._visible = False
         self._panel_shown = False
+
+    # ── Force topmost via Win32 ─────────────────────────────────────────
+    def _force_topmost(self) -> None:
+        """Use SetWindowPos(HWND_TOPMOST) to guarantee the overlay is visible."""
+        try:
+            hwnd = int(self.winId())
+            _user32.SetWindowPos(
+                hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW,
+            )
+        except Exception as e:
+            log.debug("_force_topmost failed: %s", e)
 
     # ── Placement ────────────────────────────────────────────────────────
     def _place_near_cursor(self) -> None:
