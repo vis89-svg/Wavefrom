@@ -119,7 +119,8 @@ def _cmd_dictate(args: argparse.Namespace) -> int:
         return 0
     log.info("Logged in as %s", display_name)
 
-    return _run_app(settings, api_key, inject=not args.no_inject, app=app)
+    return _run_app(settings, api_key, inject=not args.no_inject, app=app,
+                    display_name=display_name)
 
 
 # ------------------------------------------------------------------- app
@@ -384,7 +385,7 @@ class HotkeyController:
 
 
 def _run_app(settings: Settings, api_key: str, inject: bool = True,
-             app=None) -> int:
+             app=None, display_name: str = "") -> int:
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
@@ -513,8 +514,11 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
         from src.ui.main_window import MainWindow
         hist_page = HistoryPage()
         settings_page = SettingsPage(settings, on_save=on_settings_saved)
-        main_win = MainWindow(hist_page, settings_page)
+        main_win = MainWindow(hist_page, settings_page,
+                              display_name=display_name)
         main_win.show()
+        main_win.raise_()
+        main_win.activateWindow()
     except Exception as e:
         log.warning("Failed to build main window: %s", e)
         main_win = None
