@@ -30,7 +30,6 @@ from src.notify import toast as toast_win
 from src.single_instance import acquire as acquire_mutex
 from src.streaming import DictationEngine
 from src.transcribe import TranscriptionClient
-from src.ui.settings_dialog import show_settings_dialog
 from src.ui.tray_qt import TrayIcon
 from src.version import APP_ID, APP_NAME, VERSION
 
@@ -101,13 +100,7 @@ def _cmd_dictate(args: argparse.Namespace) -> int:
 
     api_key = get_api_key()
     if validate(settings, api_key) and not args.local:
-        log.warning("No API key configured; opening settings...")
-        show_settings_dialog(settings, on_save=lambda s: None)
-        settings = load_settings()
-        api_key = get_api_key()
-        if validate(settings, api_key):
-            log.error("Setup cancelled — cannot run without an API key.")
-            return 1
+        log.warning("No API key configured; will prompt at settings.")
 
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication(sys.argv)
@@ -421,7 +414,6 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
     if settings.overlay:
         from src.ui.overlay_qt import OverlayWindow as QtOverlayWindow
         overlay = QtOverlayWindow()
-        overlay.start()
         overlay.set_hotkeys(settings.hotkey, settings.live_hotkey)
 
     engine = DictationEngine(
@@ -450,8 +442,13 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
             main_win.activateWindow()
 
     def on_open_settings() -> None:
-        s = load_settings()
-        show_settings_dialog(s, on_save=on_settings_saved)
+        if main_win:
+            main_win.show()
+            main_win.raise_()
+            main_win.activateWindow()
+            # Switch to settings page (index 1)
+            if hasattr(main_win, '_stack'):
+                main_win._stack.setCurrentIndex(1)
 
     def on_settings_saved(new_settings: Settings) -> None:
         current_settings["hotkey"] = new_settings.hotkey
