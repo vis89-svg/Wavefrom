@@ -1,14 +1,15 @@
 """Persistent dock-bar overlay: idle bar + waveform + review panel (PySide6).
 
-Three visual modes in a single always-on-top window fixed at bottom-center:
-  1. **Idle bar** — thin pill with waveform icon + "Dictation" label, always
-     visible above the taskbar.
-  2. **Live indicator** — expands in-place to show animated waveform, state
+Three visual modes in a single always-on-top window fixed at bottom-center
+(~2 cm above the taskbar):
+  1. **Idle bar** -- thin pill with waveform icon + "Dictation" label, always
+     visible.
+  2. **Live indicator** -- expands in-place to show animated waveform, state
      label, and Stop button during recording / transcribing / cleaning.
-  3. **Review panel** — expands in-place to show cleaned text with Polish /
+  3. **Review panel** -- expands in-place to show cleaned text with Polish /
      Send / Clipboard / X buttons when done.
 
-The window never hides — it collapses back to the idle bar after dictation.
+The window never hides -- it collapses back to the idle bar after dictation.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -78,11 +80,10 @@ _STATE_COLORS = {
 _LEVEL_DECAY = 0.85
 _BAR_COUNT = 14
 _AUTO_DISMISS_MS = 15000
-_DOCK_MARGIN = 80  # px above the work-area bottom edge
 _DOCK_WIDTH = 420
 _IDLE_HEIGHT = 36
-_PILL_MIN_HEIGHT = 90
-_REVIEW_MIN_HEIGHT = 260
+_PILL_HEIGHT = 100
+_REVIEW_HEIGHT = 280
 
 
 # ── Win32 helpers ─────────────────────────────────────────────────────────────
@@ -152,19 +153,12 @@ class WaveformBars(QWidget):
 
 
 # ── Styles ────────────────────────────────────────────────────────────────────
-_BAR_STYLE = """
-QWidget#bar {
+_SHARED_CONTAINER = """
+QWidget {{
     background-color: #20242a;
     border: 1px solid #3a4048;
-    border-radius: 12px;
-}
-"""
-_PILL_STYLE = """
-QWidget#pill {
-    background-color: #20242a;
-    border: 1px solid #3a4048;
-    border-radius: 14px;
-}
+    border-radius: {radius}px;
+}}
 """
 _BTN_BASE = (
     "QPushButton {{ "
@@ -183,13 +177,7 @@ _BTN_CLOSE = (
     "  border-radius: 6px; padding: 0 10px; font: 11px 'Segoe UI'; }"
     "QPushButton:hover { background: #e5484d; color: #fff; }"
 )
-
-_REVIEW_STYLE = """
-QWidget#review {
-    background-color: #20242a;
-    border: 1px solid #3a4048;
-    border-radius: 14px;
-}
+_REVIEW_TEXT = """
 QTextEdit {
     background: #181c21; color: #e6e9ee; border: none;
     border-radius: 6px; padding: 6px; font: 10px 'Segoe UI';
@@ -197,16 +185,122 @@ QTextEdit {
 """
 
 
+# ── Page widgets ──────────────────────────────────────────────────────────────
+class _BarPage(QWidget):
+    """Idle bar: thin pill with icon + label + optional status text."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 4, 14, 4)
+        lay.setSpacing(8)
+
+        self._icon = QLabel("\u25b6")
+        self._icon.setStyleSheet("color: #30a46c; font: 11px 'Segoe UI';")
+        lay.addWidget(self._icon)
+
+        self._label = QLabel("Dictation")
+        self._label.setStyleSheet("color: #8a8f98; font: 10px 'Segoe UI';")
+        lay.addWidget(self._label)
+        lay.addStretch()
+
+        self._status = QLabel("")
+        self._status.setStyleSheet("color: #5a5e68; font: 9px 'Segoe UI';")
+        lay.addWidget(self._status)
+
+
+class _PillPage(QWidget):
+    """Recording / transcribing / cleaning: waveform + state label + stop."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 8, 14, 8)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        self._dot = QLabel("\u25cf")
+        self._dot.setFixedWidth(14)
+        self._dot.setStyleSheet("color: #8a8f98; font: 12px 'Segoe UI';")
+        head.addWidget(self._dot)
+
+        self._state_lbl = QLabel("Idle")
+        self._state_lbl.setStyleSheet(
+            "color: #d7dbe0; font: 11px 'Segoe UI'; font-weight: bold;"
+        )
+        head.addWidget(self._state_lbl)
+        head.addStretch()
+
+        self._stop_btn = QPushButton("\u25a0 Stop")
+        self._stop_btn.setStyleSheet(_BTN_STOP)
+        self._stop_btn.setFixedHeight(26)
+        self._stop_btn.hide()
+        head.addWidget(self._stop_btn)
+        lay.addLayout(head)
+
+        self._waveform = WaveformBars(self)
+        lay.addWidget(self._waveform)
+
+        self._hotkey_lbl = QLabel("")
+        self._hotkey_lbl.setStyleSheet("color: #6a6e78; font: 9px 'Segoe UI';")
+        lay.addWidget(self._hotkey_lbl)
+
+
+class _ReviewPage(QWidget):
+    """Done: cleaned text + action buttons."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+
+        self._hotkey_lbl = QLabel("")
+        self._hotkey_lbl.setStyleSheet("color: #6a6e78; font: 9px 'Segoe UI';")
+        lay.addWidget(self._hotkey_lbl)
+
+        self._txt = QTextEdit()
+        self._txt.setReadOnly(True)
+        self._txt.setMinimumHeight(120)
+        self._txt.setMaximumHeight(200)
+        lay.addWidget(self._txt)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(6)
+
+        self._polish_btn = QPushButton("Polish")
+        self._polish_btn.setStyleSheet(_BTN_POLISH)
+        self._polish_btn.setFixedHeight(28)
+        btn_row.addWidget(self._polish_btn)
+
+        self._send_btn = QPushButton("Send")
+        self._send_btn.setStyleSheet(_BTN_SEND)
+        self._send_btn.setFixedHeight(28)
+        btn_row.addWidget(self._send_btn)
+
+        self._clip_btn = QPushButton("Clipboard")
+        self._clip_btn.setStyleSheet(_BTN_CLIP)
+        self._clip_btn.setFixedHeight(28)
+        btn_row.addWidget(self._clip_btn)
+
+        btn_row.addStretch()
+
+        self._close_btn = QPushButton("X")
+        self._close_btn.setStyleSheet(_BTN_CLOSE)
+        self._close_btn.setFixedHeight(28)
+        self._close_btn.setFixedWidth(36)
+        btn_row.addWidget(self._close_btn)
+
+        lay.addLayout(btn_row)
+
+
 # ── Main overlay widget ──────────────────────────────────────────────────────
 class OverlayWindow(QWidget):
     """Persistent dock-bar overlay.  All Qt work happens on the GUI thread.
 
-    Three visual modes in one fixed-position window:
-      - **idle bar**: thin pill, always visible, click-through.
-      - **live indicator** (recording/transcribing/cleaning): expanded pill
-        with animated waveform, click-through.
-      - **review panel** ("done"): expanded with cleaned text and action
-        buttons.  Interactive (no click-through).
+    Uses a QStackedWidget so exactly one page (bar / pill / review) is
+    visible at a time.  The window resizes and repositions itself at
+    bottom-center whenever the page changes.
     """
 
     _sig_state = Signal(str, str)
@@ -219,7 +313,6 @@ class OverlayWindow(QWidget):
         super().__init__(None)
         self._visible = False
         self._polishing = False
-        self._panel_shown = False
         self._hold_hotkey = ""
         self._live_hotkey = ""
 
@@ -245,134 +338,25 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
-        self._root_lay = QVBoxLayout(self)
-        self._root_lay.setContentsMargins(0, 0, 0, 0)
-        self._root_lay.setSpacing(0)
+        root_lay = QVBoxLayout(self)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.setSpacing(0)
 
-        # ── Idle bar (always visible when app is running) ────────────────
-        self._bar = QWidget(self)
-        self._bar.setObjectName("bar")
-        self._bar.setStyleSheet(_BAR_STYLE)
-        bar_lay = QHBoxLayout(self._bar)
-        bar_lay.setContentsMargins(14, 4, 14, 4)
-        bar_lay.setSpacing(8)
+        # Stacked widget holds the three pages
+        self._stack = QStackedWidget(self)
 
-        self._bar_icon = QLabel("\u25b6")  # small waveform-like icon
-        self._bar_icon.setStyleSheet(
-            "color: #30a46c; font: 11px 'Segoe UI';"
-        )
-        bar_lay.addWidget(self._bar_icon)
+        self._bar_page = _BarPage()
+        self._pill_page = _PillPage()
+        self._review_page = _ReviewPage()
 
-        self._bar_label = QLabel("Dictation")
-        self._bar_label.setStyleSheet(
-            "color: #8a8f98; font: 10px 'Segoe UI';"
-        )
-        bar_lay.addWidget(self._bar_label)
-        bar_lay.addStretch()
+        self._stack.addWidget(self._bar_page)    # index 0
+        self._stack.addWidget(self._pill_page)   # index 1
+        self._stack.addWidget(self._review_page) # index 2
 
-        self._bar_status = QLabel("")
-        self._bar_status.setStyleSheet(
-            "color: #5a5e68; font: 9px 'Segoe UI';"
-        )
-        bar_lay.addWidget(self._bar_status)
+        root_lay.addWidget(self._stack)
 
-        # ── Pill container (live view) ───────────────────────────────────
-        self._pill = QWidget(self)
-        self._pill.setObjectName("pill")
-        self._pill.setStyleSheet(_PILL_STYLE)
-        pill_lay = QVBoxLayout(self._pill)
-        pill_lay.setContentsMargins(14, 8, 14, 8)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        self._dot = QLabel("\u25cf")
-        self._dot.setFixedWidth(14)
-        self._dot.setStyleSheet("color: #8a8f98; font: 12px 'Segoe UI';")
-        head.addWidget(self._dot)
-
-        self._state_lbl = QLabel("Idle")
-        self._state_lbl.setStyleSheet(
-            "color: #d7dbe0; font: 11px 'Segoe UI'; font-weight: bold;"
-        )
-        head.addWidget(self._state_lbl)
-        head.addStretch()
-
-        self._stop_btn = QPushButton("\u25a0 Stop")
-        self._stop_btn.setObjectName("stopBtn")
-        self._stop_btn.setStyleSheet(_BTN_STOP)
-        self._stop_btn.setFixedHeight(26)
-        self._stop_btn.clicked.connect(self._on_stop)
-        self._stop_btn.hide()
-        head.addWidget(self._stop_btn)
-        pill_lay.addLayout(head)
-
-        self._waveform = WaveformBars(self._pill)
-        pill_lay.addWidget(self._waveform)
-
-        self._hotkey_lbl = QLabel("")
-        self._hotkey_lbl.setStyleSheet("color: #6a6e78; font: 9px 'Segoe UI';")
-        pill_lay.addWidget(self._hotkey_lbl)
-
-        # ── Review container (done view) ─────────────────────────────────
-        self._review = QWidget(self)
-        self._review.setObjectName("review")
-        self._review.setStyleSheet(_REVIEW_STYLE)
-        rev_lay = QVBoxLayout(self._review)
-        rev_lay.setContentsMargins(10, 8, 10, 8)
-
-        self._hotkey_lbl_review = QLabel("")
-        self._hotkey_lbl_review.setStyleSheet(
-            "color: #6a6e78; font: 9px 'Segoe UI';"
-        )
-        rev_lay.addWidget(self._hotkey_lbl_review)
-
-        self._txt = QTextEdit()
-        self._txt.setReadOnly(True)
-        self._txt.setMinimumHeight(120)
-        self._txt.setMaximumHeight(200)
-        rev_lay.addWidget(self._txt)
-
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(6)
-
-        self._polish_btn = QPushButton("Polish")
-        self._polish_btn.setStyleSheet(_BTN_POLISH)
-        self._polish_btn.setFixedHeight(28)
-        self._polish_btn.clicked.connect(self._on_polish)
-        btn_row.addWidget(self._polish_btn)
-
-        self._send_btn = QPushButton("Send")
-        self._send_btn.setStyleSheet(_BTN_SEND)
-        self._send_btn.setFixedHeight(28)
-        self._send_btn.clicked.connect(self._on_send)
-        btn_row.addWidget(self._send_btn)
-
-        self._clip_btn = QPushButton("Clipboard")
-        self._clip_btn.setStyleSheet(_BTN_CLIP)
-        self._clip_btn.setFixedHeight(28)
-        self._clip_btn.clicked.connect(self._on_clipboard)
-        btn_row.addWidget(self._clip_btn)
-
-        btn_row.addStretch()
-
-        self._close_btn = QPushButton("X")
-        self._close_btn.setStyleSheet(_BTN_CLOSE)
-        self._close_btn.setFixedHeight(28)
-        self._close_btn.setFixedWidth(36)
-        self._close_btn.clicked.connect(self._on_close)
-        btn_row.addWidget(self._close_btn)
-
-        rev_lay.addLayout(btn_row)
-
-        self._root_lay.addWidget(self._bar)
-        self._root_lay.addWidget(self._pill)
-        self._root_lay.addWidget(self._review)
-
-        # Initially: bar visible, pill & review hidden
-        self._bar.setVisible(True)
-        self._pill.setVisible(False)
-        self._review.setVisible(False)
+        # Start on the idle bar
+        self._stack.setCurrentIndex(0)
 
         # Shadow
         shadow = QGraphicsDropShadowEffect(self)
@@ -398,6 +382,13 @@ class OverlayWindow(QWidget):
             self._apply_clipboard_result, Qt.ConnectionType.QueuedConnection
         )
 
+        # Wire button handlers
+        self._pill_page._stop_btn.clicked.connect(self._on_stop)
+        self._review_page._polish_btn.clicked.connect(self._on_polish)
+        self._review_page._send_btn.clicked.connect(self._on_send)
+        self._review_page._clip_btn.clicked.connect(self._on_clipboard)
+        self._review_page._close_btn.clicked.connect(self._on_close)
+
     # ── Public API (called from ANY thread) ─────────────────────────────
     def set_state(self, state: str, text: str = "") -> None:
         self._sig_state.emit(state, text)
@@ -421,16 +412,13 @@ class OverlayWindow(QWidget):
         self._hold_hotkey = hold
         self._live_hotkey = live
         text = f"Hold {hold} \u00b7 Tap {live}"
-        self._hotkey_lbl.setText(text)
-        self._hotkey_lbl_review.setText(text)
+        self._pill_page._hotkey_lbl.setText(text)
+        self._review_page._hotkey_lbl.setText(text)
 
     def start(self) -> None:
         """Show the idle bar at the dock position immediately."""
         self._visible = True
-        self._bar.setVisible(True)
-        self._pill.setVisible(False)
-        self._review.setVisible(False)
-        self._panel_shown = False
+        self._stack.setCurrentIndex(0)
         self._place_dock(_IDLE_HEIGHT)
         self.show()
         self.raise_()
@@ -438,7 +426,7 @@ class OverlayWindow(QWidget):
         self._make_click_through()
 
     def stop(self) -> None:
-        """Collapse back to the idle bar (don't hide the window)."""
+        """Collapse back to the idle bar."""
         self._collapse_to_bar()
 
     # ── Click-through ───────────────────────────────────────────────────
@@ -459,61 +447,52 @@ class OverlayWindow(QWidget):
         if not self._visible:
             self._visible = True
             self.show()
-            self.raise_()
-            self._force_topmost()
 
         color = _STATE_COLORS.get(state, "#8a8f98")
-        self._dot.setStyleSheet(f"color: {color}; font: 12px 'Segoe UI';")
-        self._state_lbl.setText(_STATE_LABELS.get(state, state))
-        self._state_lbl.setStyleSheet(
+        self._pill_page._dot.setStyleSheet(
+            f"color: {color}; font: 12px 'Segoe UI';"
+        )
+        self._pill_page._state_lbl.setText(_STATE_LABELS.get(state, state))
+        self._pill_page._state_lbl.setStyleSheet(
             f"color: {color}; font: 11px 'Segoe UI'; font-weight: bold;"
         )
-        self._bar_status.setText(_STATE_LABELS.get(state, state))
-        self._bar_status.setStyleSheet(
+        self._bar_page._status.setText(_STATE_LABELS.get(state, state))
+        self._bar_page._status.setStyleSheet(
             f"color: {color}; font: 9px 'Segoe UI';"
         )
 
         if state == "done":
             self._show_panel(text)
         else:
-            self._show_live(state, text)
+            self._show_live(state)
 
-    def _show_live(self, state: str, text: str) -> None:
-        """Expand to the waveform pill for recording / transcribing / cleaning."""
+    def _show_live(self, state: str) -> None:
+        """Expand to the waveform pill."""
         self._dismiss_timer.stop()
-        if self._panel_shown:
-            self._review.hide()
-            self._panel_shown = False
-
-        self._bar.hide()
-        self._pill.show()
+        self._stack.setCurrentIndex(1)
 
         if state == "recording":
             self._set_interactive(True)
-            self._stop_btn.show()
+            self._pill_page._stop_btn.show()
         else:
             self._make_click_through()
-            self._stop_btn.hide()
+            self._pill_page._stop_btn.hide()
 
-        self._place_dock(_PILL_MIN_HEIGHT)
+        self._place_dock(_PILL_HEIGHT)
         self.raise_()
         self._force_topmost()
 
     def _show_panel(self, text: str) -> None:
-        """Expand to the review panel for the done state."""
-        if not self._panel_shown:
-            self._bar.hide()
-            self._pill.hide()
-            self._review.show()
-            self._panel_shown = True
+        """Expand to the review panel."""
+        self._stack.setCurrentIndex(2)
 
-        self._txt.setPlainText((text or "").strip())
+        self._review_page._txt.setPlainText((text or "").strip())
         self._polishing = False
-        self._polish_btn.setEnabled(True)
-        self._polish_btn.setText("Polish")
-        self._send_btn.setEnabled(True)
-        self._send_btn.setText("Send")
-        self._place_dock(_REVIEW_MIN_HEIGHT)
+        self._review_page._polish_btn.setEnabled(True)
+        self._review_page._polish_btn.setText("Polish")
+        self._review_page._send_btn.setEnabled(True)
+        self._review_page._send_btn.setText("Send")
+        self._place_dock(_REVIEW_HEIGHT)
         self.raise_()
         self._force_topmost()
         self._set_interactive(True)
@@ -522,90 +501,86 @@ class OverlayWindow(QWidget):
     def _collapse_to_bar(self) -> None:
         """Collapse back to the thin idle bar."""
         self._dismiss_timer.stop()
-        self._review.hide()
-        self._pill.hide()
-        self._bar.show()
-        self._bar_status.setText("")
-        self._panel_shown = False
+        self._stack.setCurrentIndex(0)
+        self._bar_page._status.setText("")
         self._make_click_through()
         self._place_dock(_IDLE_HEIGHT)
+        self.raise_()
+        self._force_topmost()
 
     # ── Result handlers (GUI thread) ────────────────────────────────────
     def _apply_polish_result(self, result) -> None:
         self._polishing = False
         if result:
-            self._polish_btn.setEnabled(True)
-            self._polish_btn.setText("Polish")
-            self._txt.setPlainText((result or "").strip())
-            self._state_lbl.setText("Polished")
-            self._state_lbl.setStyleSheet(
+            self._review_page._polish_btn.setEnabled(True)
+            self._review_page._polish_btn.setText("Polish")
+            self._review_page._txt.setPlainText((result or "").strip())
+            self._pill_page._state_lbl.setText("Polished")
+            self._pill_page._state_lbl.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
             )
-            self._bar_status.setText("Polished")
-            self._bar_status.setStyleSheet(
+            self._bar_page._status.setText("Polished")
+            self._bar_page._status.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 9px 'Segoe UI';"
             )
-            self._send_btn.setEnabled(True)
+            self._review_page._send_btn.setEnabled(True)
         else:
-            self._polish_btn.setEnabled(True)
-            self._polish_btn.setText("Polish")
-            self._state_lbl.setText("Polish failed")
-            self._state_lbl.setStyleSheet(
+            self._review_page._polish_btn.setEnabled(True)
+            self._review_page._polish_btn.setText("Polish")
+            self._pill_page._state_lbl.setText("Polish failed")
+            self._pill_page._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
             )
-            self._bar_status.setText("Polish failed")
-            self._bar_status.setStyleSheet(
+            self._bar_page._status.setText("Polish failed")
+            self._bar_page._status.setStyleSheet(
                 "color: #e5484d; font: 9px 'Segoe UI';"
             )
-        if self._panel_shown:
-            self._dismiss_timer.start(_AUTO_DISMISS_MS)
+        self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     def _apply_send_result(self, text: str | None) -> None:
         self._polishing = False
         if text:
-            self._state_lbl.setText("Sent")
-            self._state_lbl.setStyleSheet(
+            self._pill_page._state_lbl.setText("Sent")
+            self._pill_page._state_lbl.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
             )
-            self._bar_status.setText("Sent")
-            self._bar_status.setStyleSheet(
+            self._bar_page._status.setText("Sent")
+            self._bar_page._status.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 9px 'Segoe UI';"
             )
         else:
-            self._state_lbl.setText("No polished text")
-            self._state_lbl.setStyleSheet(
+            self._pill_page._state_lbl.setText("No polished text")
+            self._pill_page._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
             )
-            self._bar_status.setText("")
-        self._send_btn.setEnabled(True)
-        self._send_btn.setText("Send")
-        if self._panel_shown:
-            self._txt.setPlainText((text or "").strip())
-            self._dismiss_timer.start(_AUTO_DISMISS_MS)
+            self._bar_page._status.setText("")
+        self._review_page._send_btn.setEnabled(True)
+        self._review_page._send_btn.setText("Send")
+        self._review_page._txt.setPlainText((text or "").strip())
+        self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     def _apply_clipboard_result(self, text: str | None) -> None:
         self._polishing = False
         if text:
-            self._state_lbl.setText("Copied")
-            self._state_lbl.setStyleSheet(
+            self._pill_page._state_lbl.setText("Copied")
+            self._pill_page._state_lbl.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
             )
-            self._bar_status.setText("Copied")
-            self._bar_status.setStyleSheet(
+            self._bar_page._status.setText("Copied")
+            self._bar_page._status.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 9px 'Segoe UI';"
             )
         else:
-            self._state_lbl.setText("No polished text")
-            self._state_lbl.setStyleSheet(
+            self._pill_page._state_lbl.setText("No polished text")
+            self._pill_page._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
             )
-        if self._panel_shown:
-            self._dismiss_timer.start(_AUTO_DISMISS_MS)
+        self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
     # ── Level feed (GUI thread) ─────────────────────────────────────────
     def _on_level(self, db: float) -> None:
-        self._waveform.push_level(db)
-        self._waveform.tick_decay()
+        self._pill_page._waveform.push_level(db)
+        self._pill_page._waveform.tick_decay()
 
     # ── Button handlers ─────────────────────────────────────────────────
     def _on_polish(self) -> None:
@@ -613,8 +588,8 @@ class OverlayWindow(QWidget):
             return
         self._dismiss_timer.stop()
         self._polishing = True
-        self._polish_btn.setEnabled(False)
-        self._polish_btn.setText("Polishing\u2026")
+        self._review_page._polish_btn.setEnabled(False)
+        self._review_page._polish_btn.setText("Polishing\u2026")
         threading.Thread(
             target=self._run_polish, daemon=True, name="overlay-polish"
         ).start()
@@ -632,8 +607,8 @@ class OverlayWindow(QWidget):
             return
         self._dismiss_timer.stop()
         self._polishing = True
-        self._send_btn.setEnabled(False)
-        self._send_btn.setText("Sending\u2026")
+        self._review_page._send_btn.setEnabled(False)
+        self._review_page._send_btn.setText("Sending\u2026")
         threading.Thread(
             target=self._run_send, daemon=True, name="overlay-send"
         ).start()
@@ -667,8 +642,8 @@ class OverlayWindow(QWidget):
         if self._stop_callback is None:
             return
         self._dismiss_timer.stop()
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.setText("Stopping\u2026")
+        self._pill_page._stop_btn.setEnabled(False)
+        self._pill_page._stop_btn.setText("Stopping\u2026")
         threading.Thread(
             target=self._stop_callback, daemon=True, name="overlay-stop"
         ).start()
@@ -690,11 +665,10 @@ class OverlayWindow(QWidget):
         except Exception as e:
             log.debug("_force_topmost failed: %s", e)
 
-    # ── Dock placement (fixed bottom-center, always) ───────────────────
+    # ── Dock placement (fixed bottom-center, ~2 cm above taskbar) ──────
     def _place_dock(self, height: int) -> None:
         """Position the window at bottom-center, ``height`` px above the
-        work-area bottom edge.  The window is resized to fit the current
-        content (bar / pill / review)."""
+        work-area bottom edge (the taskbar)."""
         area = _work_area()
         if area:
             left, top, right, bottom = area
@@ -706,8 +680,10 @@ class OverlayWindow(QWidget):
         w = _DOCK_WIDTH
         h = max(height, _IDLE_HEIGHT)
         px = left + (right - left - w) // 2
-        py = bottom - h - _DOCK_MARGIN
+        py = bottom - h - 28
         if py < top:
-            py = top + _DOCK_MARGIN
+            py = top + 28
         self.setFixedSize(w, h)
         self.move(px, py)
+        self.raise_()
+        self._force_topmost()

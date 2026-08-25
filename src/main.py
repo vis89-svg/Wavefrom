@@ -428,7 +428,6 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
         overlay.set_send_callback(engine.send)
         overlay.set_clipboard_callback(engine.copy_to_clipboard)
         overlay.set_stop_callback(engine.stop)
-        overlay.start()
     capture_state = {"on": False}
     tray = None
     current_settings = {"hotkey": settings.hotkey, "live_hotkey": settings.live_hotkey}
@@ -548,6 +547,11 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
     except Exception as e:
         log.warning("Failed to build main window: %s", e)
         main_win = None
+
+    # Show the dock bar AFTER the main window so it sits on top
+    if overlay:
+        from PySide6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(100, overlay.start)
 
     # Graceful shutdown on app quit
     def _cleanup() -> None:
