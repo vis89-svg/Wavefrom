@@ -243,6 +243,10 @@ class OverlayWindow(QWidget):
         self._clipboard_callback = None
         self._stop_callback = None
 
+        # Drag state
+        self._dragging = False
+        self._drag_offset = None
+
         self._build_ui()
         self._connect_signals()
 
@@ -379,6 +383,23 @@ class OverlayWindow(QWidget):
         self._sig_clipboard_result.connect(
             self._apply_clipboard_result, Qt.ConnectionType.QueuedConnection
         )
+
+    # ── Drag support ────────────────────────────────────────────────────
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_offset = event.globalPosition().toPoint() - self.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dragging and self._drag_offset is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._dragging = False
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
 
     # ── Public API (called from ANY thread) ─────────────────────────────
     def set_state(self, state: str, text: str = "") -> None:
