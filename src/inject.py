@@ -211,14 +211,33 @@ def _restore_foreground() -> None:
     When the user presses the dictation hotkey, the keyboard hook suppresses
     the keystrokes and may leave focus on the wrong window (the overlay, the
     tray, etc.).  This ensures SendInput goes to the actual target app.
+
+    Uses the AttachThreadInput trick to bypass Windows 10/11 foreground-lock
+    restrictions that silently block SetForegroundWindow.
     """
-    if _target_hwnd:
+    if not _target_hwnd:
+        return
+    try:
+        cur = user32.GetForegroundWindow()
+        if cur == _target_hwnd:
+            return
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        our_tid = _kernel32.GetCurrentThreadId()
+        cur_tid = user32.GetWindowThreadProcessId(cur, None)
+        # Attach to the current foreground thread's input queue so
+        # SetForegroundWindow is allowed.
+        attached = False
+        if cur_tid != our_tid:
+            attached = user32.AttachThreadInput(our_tid, cur_tid, True)
         try:
-            cur = user32.GetForegroundWindow()
-            if cur != _target_hwnd:
-                user32.SetForegroundWindow(_target_hwnd)
-        except Exception:
-            pass
+            user32.SetForegroundWindow(_target_hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(our_tid, cur_tid, False)
+        # Brief settle so the OS finishes the activation.
+        time.sleep(0.02)
+    except Exception:
+        pass
 
 
 def inject_text(text: str) -> None:

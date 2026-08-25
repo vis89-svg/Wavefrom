@@ -642,7 +642,7 @@ class OverlayWindow(QWidget):
             hwnd = int(self.winId())
             _user32.SetWindowPos(
                 hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
-                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW,
+                _SWP_NOMOVE | _SWP_NOSIZE,
             )
         except Exception as e:
             log.debug("_force_topmost failed: %s", e)
