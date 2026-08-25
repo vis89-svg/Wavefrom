@@ -41,21 +41,11 @@ _WS_EX_LAYERED = 0x00080000
 _WS_EX_TRANSPARENT = 0x00000020
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_NOACTIVATE = 0x08000000
-_SPI_GETWORKAREA = 0x0030
 _HWND_TOPMOST = -1
 _SWP_NOMOVE = 0x0002
 _SWP_NOSIZE = 0x0001
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
-
-
-class _RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", ctypes.c_long),
-        ("top", ctypes.c_long),
-        ("right", ctypes.c_long),
-        ("bottom", ctypes.c_long),
-    ]
 
 
 # ── State helpers ─────────────────────────────────────────────────────────────
@@ -87,13 +77,6 @@ _REVIEW_HEIGHT = 280
 
 
 # ── Win32 helpers ─────────────────────────────────────────────────────────────
-def _work_area() -> tuple[int, int, int, int] | None:
-    rect = _RECT()
-    if _user32.SystemParametersInfoW(_SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
-        return rect.left, rect.top, rect.right, rect.bottom
-    return None
-
-
 def _set_window_ex_style(hwnd: int, interactive: bool) -> None:
     """Apply WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, and
     toggle WS_EX_TRANSPARENT on/off for click-through."""
@@ -305,14 +288,15 @@ class OverlayWindow(QWidget):
 
     _sig_state = Signal(str, str)
     _sig_level = Signal(float)
-    _sig_polish_result = Signal(object)
-    _sig_send_result = Signal(object)
-    _sig_clipboard_result = Signal(object)
+    _sig_polish_result = Signal(object, int)
+    _sig_send_result = Signal(object, int)
+    _sig_clipboard_result = Signal(object, int)
 
     def __init__(self) -> None:
         super().__init__(None)
         self._visible = False
         self._polishing = False
+        self._session_id = 0
         self._hold_hotkey = ""
         self._live_hotkey = ""
 
@@ -468,6 +452,11 @@ class OverlayWindow(QWidget):
 
     def _show_live(self, state: str) -> None:
         """Expand to the waveform pill."""
+        if state == "recording":
+            # A fresh dictation is starting -- any Polish/Send/Clipboard
+            # result from a previous session that lands after this point is
+            # stale and must not be allowed to overwrite this session's text.
+            self._session_id += 1
         self._dismiss_timer.stop()
         self._stack.setCurrentIndex(1)
 
@@ -509,7 +498,10 @@ class OverlayWindow(QWidget):
         self._force_topmost()
 
     # ── Result handlers (GUI thread) ────────────────────────────────────
-    def _apply_polish_result(self, result) -> None:
+    def _apply_polish_result(self, result, session_id: int) -> None:
+        if session_id != self._session_id:
+            log.debug("Discarding stale polish result from a previous dictation session")
+            return
         self._polishing = False
         if result:
             self._review_page._polish_btn.setEnabled(True)
@@ -537,7 +529,10 @@ class OverlayWindow(QWidget):
             )
         self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
-    def _apply_send_result(self, text: str | None) -> None:
+    def _apply_send_result(self, text: str | None, session_id: int) -> None:
+        if session_id != self._session_id:
+            log.debug("Discarding stale send result from a previous dictation session")
+            return
         self._polishing = False
         if text:
             self._pill_page._state_lbl.setText("Sent")
@@ -559,7 +554,10 @@ class OverlayWindow(QWidget):
         self._review_page._txt.setPlainText((text or "").strip())
         self._dismiss_timer.start(_AUTO_DISMISS_MS)
 
-    def _apply_clipboard_result(self, text: str | None) -> None:
+    def _apply_clipboard_result(self, text: str | None, session_id: int) -> None:
+        if session_id != self._session_id:
+            log.debug("Discarding stale clipboard result from a previous dictation session")
+            return
         self._polishing = False
         if text:
             self._pill_page._state_lbl.setText("Copied")
@@ -590,17 +588,19 @@ class OverlayWindow(QWidget):
         self._polishing = True
         self._review_page._polish_btn.setEnabled(False)
         self._review_page._polish_btn.setText("Polishing\u2026")
+        session_id = self._session_id
         threading.Thread(
-            target=self._run_polish, daemon=True, name="overlay-polish"
+            target=self._run_polish, args=(session_id,),
+            daemon=True, name="overlay-polish",
         ).start()
 
-    def _run_polish(self) -> None:
+    def _run_polish(self, session_id: int) -> None:
         try:
             result = self._polish_callback()
         except Exception as e:
             log.warning("Polish pass failed: %s", e)
             result = None
-        self._sig_polish_result.emit(result)
+        self._sig_polish_result.emit(result, session_id)
 
     def _on_send(self) -> None:
         if self._polishing or self._send_callback is None:
@@ -609,34 +609,38 @@ class OverlayWindow(QWidget):
         self._polishing = True
         self._review_page._send_btn.setEnabled(False)
         self._review_page._send_btn.setText("Sending\u2026")
+        session_id = self._session_id
         threading.Thread(
-            target=self._run_send, daemon=True, name="overlay-send"
+            target=self._run_send, args=(session_id,),
+            daemon=True, name="overlay-send",
         ).start()
 
-    def _run_send(self) -> None:
+    def _run_send(self, session_id: int) -> None:
         try:
             result = self._send_callback()
         except Exception as e:
             log.warning("Send pass failed: %s", e)
             result = None
-        self._sig_send_result.emit(result)
+        self._sig_send_result.emit(result, session_id)
 
     def _on_clipboard(self) -> None:
         if self._polishing or self._clipboard_callback is None:
             return
         self._dismiss_timer.stop()
         self._polishing = True
+        session_id = self._session_id
         threading.Thread(
-            target=self._run_clipboard, daemon=True, name="overlay-clipboard"
+            target=self._run_clipboard, args=(session_id,),
+            daemon=True, name="overlay-clipboard",
         ).start()
 
-    def _run_clipboard(self) -> None:
+    def _run_clipboard(self, session_id: int) -> None:
         try:
             result = self._clipboard_callback()
         except Exception as e:
             log.warning("Clipboard pass failed: %s", e)
             result = None
-        self._sig_clipboard_result.emit(result)
+        self._sig_clipboard_result.emit(result, session_id)
 
     def _on_stop(self) -> None:
         if self._stop_callback is None:
@@ -668,15 +672,19 @@ class OverlayWindow(QWidget):
     # ── Dock placement (fixed bottom-center, ~2 cm above taskbar) ──────
     def _place_dock(self, height: int) -> None:
         """Position the window at bottom-center, ``height`` px above the
-        work-area bottom edge (the taskbar)."""
-        area = _work_area()
-        if area:
-            left, top, right, bottom = area
-        else:
-            scr = QApplication.primaryScreen().virtualGeometry()
-            left, top, right, bottom = (
-                scr.left(), scr.top(), scr.right(), scr.bottom(),
-            )
+        work-area bottom edge (the taskbar).
+
+        Uses Qt's own ``availableGeometry()`` (already DPI-scaled, already
+        excludes the taskbar) rather than the raw Win32 SPI_GETWORKAREA call
+        -- that call returns *physical* pixels, while Qt's move()/resize()
+        expect *logical* (DPI-scaled) pixels, so on a scaled display (e.g.
+        125%) the old code placed the window below the visible screen.
+        """
+        screen = self.screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        left, top, right, bottom = (
+            rect.left(), rect.top(), rect.right(), rect.bottom(),
+        )
         w = _DOCK_WIDTH
         h = max(height, _IDLE_HEIGHT)
         px = left + (right - left - w) // 2

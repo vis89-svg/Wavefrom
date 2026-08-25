@@ -373,7 +373,7 @@ def test_tap_mode_stops_after_silence(monkeypatch):
     engine._config.mode = "tap"
     monkeypatch.setattr("src.streaming.sd.InputStream",
                         lambda **kw: _FakeStream(chunk, speak_chunks=10,
-                                                 silent_chunks=120))
+                                                 silent_chunks=200))
     engine.start()
     engine.capture()
     assert engine._stop_capture.is_set()
