@@ -428,6 +428,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
         overlay.set_send_callback(engine.send)
         overlay.set_clipboard_callback(engine.copy_to_clipboard)
         overlay.set_stop_callback(engine.stop)
+        overlay.start()
     capture_state = {"on": False}
     tray = None
     current_settings = {"hotkey": settings.hotkey, "live_hotkey": settings.live_hotkey}

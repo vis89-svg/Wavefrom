@@ -1,12 +1,14 @@
-"""Floating live indicator: waveform + state + review panel (PySide6).
+"""Persistent dock-bar overlay: idle bar + waveform + review panel (PySide6).
 
-A small always-on-top, click-through window that appears near the cursor while
-dictating, showing the mic level as animated bars, the current pipeline state
-(Recording / Transcribing / Cleaning up / Done), and the final cleaned text in
-a review panel.  Mirrors the "Flow Bar" of modern dictation apps.
+Three visual modes in a single always-on-top window fixed at bottom-center:
+  1. **Idle bar** — thin pill with waveform icon + "Dictation" label, always
+     visible above the taskbar.
+  2. **Live indicator** — expands in-place to show animated waveform, state
+     label, and Stop button during recording / transcribing / cleaning.
+  3. **Review panel** — expands in-place to show cleaned text with Polish /
+     Send / Clipboard / X buttons when done.
 
-Rebuilt in PySide6 to unlock rounded corners, drop shadows, custom-painted
-waveform, and QSS-styled buttons -- none of which Tkinter supports.
+The window never hides — it collapses back to the idle bar after dictation.
 """
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ from PySide6.QtWidgets import (
 
 log = logging.getLogger(__name__)
 
-# ── Win32 constants (same as the old Tk overlay) ──────────────────────────────
+# ── Win32 constants ──────────────────────────────────────────────────────────
 _GWL_EXSTYLE = -20
 _WS_EX_LAYERED = 0x00080000
 _WS_EX_TRANSPARENT = 0x00000020
@@ -41,7 +43,6 @@ _SPI_GETWORKAREA = 0x0030
 _HWND_TOPMOST = -1
 _SWP_NOMOVE = 0x0002
 _SWP_NOSIZE = 0x0001
-_SWP_SHOWWINDOW = 0x0040
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
@@ -74,13 +75,14 @@ _STATE_COLORS = {
     "idle": "#8a8f98",
 }
 
-_ANIM_MS = 40
 _LEVEL_DECAY = 0.85
 _BAR_COUNT = 14
-_OFFSET_X = 18
-_OFFSET_Y = 26
-_PREVIEW_CHARS = 500
 _AUTO_DISMISS_MS = 15000
+_DOCK_MARGIN = 80  # px above the work-area bottom edge
+_DOCK_WIDTH = 420
+_IDLE_HEIGHT = 36
+_PILL_MIN_HEIGHT = 90
+_REVIEW_MIN_HEIGHT = 260
 
 
 # ── Win32 helpers ─────────────────────────────────────────────────────────────
@@ -89,30 +91,6 @@ def _work_area() -> tuple[int, int, int, int] | None:
     if _user32.SystemParametersInfoW(_SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
         return rect.left, rect.top, rect.right, rect.bottom
     return None
-
-
-def _cursor_pos() -> tuple[int, int]:
-    class POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-    pt = POINT()
-    if _user32.GetCursorPos(ctypes.byref(pt)):
-        return pt.x, pt.y
-    return 0, 0
-
-
-def _clamp_pos(
-    x: int, y: int, w: int, h: int,
-    left: int, top: int, right: int, bottom: int,
-    gap: int = 14, margin: int = 8,
-    offset_x: int = _OFFSET_X, offset_y: int = _OFFSET_Y,
-) -> tuple[int, int]:
-    px = min(max(x + offset_x, left + margin), max(right - w - margin, left + margin))
-    py = y - h - gap
-    if py < top + margin:
-        py = y + offset_y
-    py = min(max(py, top + margin), max(bottom - h - margin, top + margin))
-    return px, py
 
 
 def _set_window_ex_style(hwnd: int, interactive: bool) -> None:
@@ -174,11 +152,18 @@ class WaveformBars(QWidget):
 
 
 # ── Styles ────────────────────────────────────────────────────────────────────
+_BAR_STYLE = """
+QWidget#bar {
+    background-color: #20242a;
+    border: 1px solid #3a4048;
+    border-radius: 12px;
+}
+"""
 _PILL_STYLE = """
 QWidget#pill {
     background-color: #20242a;
     border: 1px solid #3a4048;
-    border-radius: 18px;
+    border-radius: 14px;
 }
 """
 _BTN_BASE = (
@@ -214,16 +199,16 @@ QTextEdit {
 
 # ── Main overlay widget ──────────────────────────────────────────────────────
 class OverlayWindow(QWidget):
-    """Thread-safe overlay.  All Qt work happens on the main/GUI thread.
+    """Persistent dock-bar overlay.  All Qt work happens on the GUI thread.
 
-    Two visual modes:
-      - live indicator (recording/transcribing/cleaning): click-through pill
-        with animated waveform near the cursor.
-      - review panel ("done"): full cleaned text with Polish / Send /
-        Clipboard / X buttons.  Interactive (no click-through).
+    Three visual modes in one fixed-position window:
+      - **idle bar**: thin pill, always visible, click-through.
+      - **live indicator** (recording/transcribing/cleaning): expanded pill
+        with animated waveform, click-through.
+      - **review panel** ("done"): expanded with cleaned text and action
+        buttons.  Interactive (no click-through).
     """
 
-    # Signals emitted from background threads, processed on the GUI thread
     _sig_state = Signal(str, str)
     _sig_level = Signal(float)
     _sig_polish_result = Signal(object)
@@ -242,10 +227,6 @@ class OverlayWindow(QWidget):
         self._send_callback = None
         self._clipboard_callback = None
         self._stop_callback = None
-
-        # Drag state
-        self._dragging = False
-        self._drag_offset = None
 
         self._build_ui()
         self._connect_signals()
@@ -268,6 +249,33 @@ class OverlayWindow(QWidget):
         self._root_lay.setContentsMargins(0, 0, 0, 0)
         self._root_lay.setSpacing(0)
 
+        # ── Idle bar (always visible when app is running) ────────────────
+        self._bar = QWidget(self)
+        self._bar.setObjectName("bar")
+        self._bar.setStyleSheet(_BAR_STYLE)
+        bar_lay = QHBoxLayout(self._bar)
+        bar_lay.setContentsMargins(14, 4, 14, 4)
+        bar_lay.setSpacing(8)
+
+        self._bar_icon = QLabel("\u25b6")  # small waveform-like icon
+        self._bar_icon.setStyleSheet(
+            "color: #30a46c; font: 11px 'Segoe UI';"
+        )
+        bar_lay.addWidget(self._bar_icon)
+
+        self._bar_label = QLabel("Dictation")
+        self._bar_label.setStyleSheet(
+            "color: #8a8f98; font: 10px 'Segoe UI';"
+        )
+        bar_lay.addWidget(self._bar_label)
+        bar_lay.addStretch()
+
+        self._bar_status = QLabel("")
+        self._bar_status.setStyleSheet(
+            "color: #5a5e68; font: 9px 'Segoe UI';"
+        )
+        bar_lay.addWidget(self._bar_status)
+
         # ── Pill container (live view) ───────────────────────────────────
         self._pill = QWidget(self)
         self._pill.setObjectName("pill")
@@ -275,7 +283,6 @@ class OverlayWindow(QWidget):
         pill_lay = QVBoxLayout(self._pill)
         pill_lay.setContentsMargins(14, 8, 14, 8)
 
-        # Header row: dot + state label + stop button
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
         self._dot = QLabel("\u25cf")
@@ -299,7 +306,6 @@ class OverlayWindow(QWidget):
         head.addWidget(self._stop_btn)
         pill_lay.addLayout(head)
 
-        # Waveform
         self._waveform = WaveformBars(self._pill)
         pill_lay.addWidget(self._waveform)
 
@@ -315,7 +321,9 @@ class OverlayWindow(QWidget):
         rev_lay.setContentsMargins(10, 8, 10, 8)
 
         self._hotkey_lbl_review = QLabel("")
-        self._hotkey_lbl_review.setStyleSheet("color: #6a6e78; font: 9px 'Segoe UI';")
+        self._hotkey_lbl_review.setStyleSheet(
+            "color: #6a6e78; font: 9px 'Segoe UI';"
+        )
         rev_lay.addWidget(self._hotkey_lbl_review)
 
         self._txt = QTextEdit()
@@ -357,11 +365,13 @@ class OverlayWindow(QWidget):
 
         rev_lay.addLayout(btn_row)
 
+        self._root_lay.addWidget(self._bar)
         self._root_lay.addWidget(self._pill)
         self._root_lay.addWidget(self._review)
 
-        # Initially show pill, hide review
-        self._pill.setVisible(True)
+        # Initially: bar visible, pill & review hidden
+        self._bar.setVisible(True)
+        self._pill.setVisible(False)
         self._review.setVisible(False)
 
         # Shadow
@@ -372,8 +382,12 @@ class OverlayWindow(QWidget):
         self.setGraphicsEffect(shadow)
 
     def _connect_signals(self) -> None:
-        self._sig_state.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
-        self._sig_level.connect(self._on_level, Qt.ConnectionType.QueuedConnection)
+        self._sig_state.connect(
+            self._apply_state, Qt.ConnectionType.QueuedConnection
+        )
+        self._sig_level.connect(
+            self._on_level, Qt.ConnectionType.QueuedConnection
+        )
         self._sig_polish_result.connect(
             self._apply_polish_result, Qt.ConnectionType.QueuedConnection
         )
@@ -383,23 +397,6 @@ class OverlayWindow(QWidget):
         self._sig_clipboard_result.connect(
             self._apply_clipboard_result, Qt.ConnectionType.QueuedConnection
         )
-
-    # ── Drag support ────────────────────────────────────────────────────
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-            self._drag_offset = event.globalPosition().toPoint() - self.pos()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._dragging and self._drag_offset is not None:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._dragging = False
-        self._drag_offset = None
-        super().mouseReleaseEvent(event)
 
     # ── Public API (called from ANY thread) ─────────────────────────────
     def set_state(self, state: str, text: str = "") -> None:
@@ -423,20 +420,26 @@ class OverlayWindow(QWidget):
     def set_hotkeys(self, hold: str, live: str) -> None:
         self._hold_hotkey = hold
         self._live_hotkey = live
-        text = f"Hold {hold} · Tap {live}"
+        text = f"Hold {hold} \u00b7 Tap {live}"
         self._hotkey_lbl.setText(text)
         self._hotkey_lbl_review.setText(text)
 
     def start(self) -> None:
-        # Stay hidden until the first real dictation state comes in via
-        # set_state() -- _apply_state() shows the window itself at that
-        # point. Showing here unconditionally would flash an empty "Idle"
-        # pill at (0, 0) the instant the app launches, before any hotkey
-        # is ever pressed.
-        self._visible = False
+        """Show the idle bar at the dock position immediately."""
+        self._visible = True
+        self._bar.setVisible(True)
+        self._pill.setVisible(False)
+        self._review.setVisible(False)
+        self._panel_shown = False
+        self._place_dock(_IDLE_HEIGHT)
+        self.show()
+        self.raise_()
+        self._force_topmost()
+        self._make_click_through()
 
     def stop(self) -> None:
-        self.hide()
+        """Collapse back to the idle bar (don't hide the window)."""
+        self._collapse_to_bar()
 
     # ── Click-through ───────────────────────────────────────────────────
     def _set_interactive(self, interactive: bool) -> None:
@@ -449,16 +452,15 @@ class OverlayWindow(QWidget):
     # ── State handling (runs on GUI thread via signal) ──────────────────
     def _apply_state(self, state: str, text: str) -> None:
         if state == "idle":
-            if self._visible:
-                self.hide()
-                self._visible = False
+            self._collapse_to_bar()
             return
+
+        # Ensure window is visible for any active state
         if not self._visible:
-            self._place_near_cursor()
+            self._visible = True
             self.show()
             self.raise_()
             self._force_topmost()
-            self._visible = True
 
         color = _STATE_COLORS.get(state, "#8a8f98")
         self._dot.setStyleSheet(f"color: {color}; font: 12px 'Segoe UI';")
@@ -466,18 +468,25 @@ class OverlayWindow(QWidget):
         self._state_lbl.setStyleSheet(
             f"color: {color}; font: 11px 'Segoe UI'; font-weight: bold;"
         )
+        self._bar_status.setText(_STATE_LABELS.get(state, state))
+        self._bar_status.setStyleSheet(
+            f"color: {color}; font: 9px 'Segoe UI';"
+        )
+
         if state == "done":
             self._show_panel(text)
         else:
             self._show_live(state, text)
 
     def _show_live(self, state: str, text: str) -> None:
+        """Expand to the waveform pill for recording / transcribing / cleaning."""
         self._dismiss_timer.stop()
         if self._panel_shown:
             self._review.hide()
             self._panel_shown = False
-            self._pill.show()
-            self._force_topmost()
+
+        self._bar.hide()
+        self._pill.show()
 
         if state == "recording":
             self._set_interactive(True)
@@ -486,8 +495,14 @@ class OverlayWindow(QWidget):
             self._make_click_through()
             self._stop_btn.hide()
 
+        self._place_dock(_PILL_MIN_HEIGHT)
+        self.raise_()
+        self._force_topmost()
+
     def _show_panel(self, text: str) -> None:
+        """Expand to the review panel for the done state."""
         if not self._panel_shown:
+            self._bar.hide()
             self._pill.hide()
             self._review.show()
             self._panel_shown = True
@@ -498,11 +513,22 @@ class OverlayWindow(QWidget):
         self._polish_btn.setText("Polish")
         self._send_btn.setEnabled(True)
         self._send_btn.setText("Send")
-        self._place_review_panel()
+        self._place_dock(_REVIEW_MIN_HEIGHT)
         self.raise_()
         self._force_topmost()
         self._set_interactive(True)
         self._dismiss_timer.start(_AUTO_DISMISS_MS)
+
+    def _collapse_to_bar(self) -> None:
+        """Collapse back to the thin idle bar."""
+        self._dismiss_timer.stop()
+        self._review.hide()
+        self._pill.hide()
+        self._bar.show()
+        self._bar_status.setText("")
+        self._panel_shown = False
+        self._make_click_through()
+        self._place_dock(_IDLE_HEIGHT)
 
     # ── Result handlers (GUI thread) ────────────────────────────────────
     def _apply_polish_result(self, result) -> None:
@@ -515,6 +541,10 @@ class OverlayWindow(QWidget):
             self._state_lbl.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
             )
+            self._bar_status.setText("Polished")
+            self._bar_status.setStyleSheet(
+                f"color: {_STATE_COLORS['done']}; font: 9px 'Segoe UI';"
+            )
             self._send_btn.setEnabled(True)
         else:
             self._polish_btn.setEnabled(True)
@@ -522,6 +552,10 @@ class OverlayWindow(QWidget):
             self._state_lbl.setText("Polish failed")
             self._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+            self._bar_status.setText("Polish failed")
+            self._bar_status.setStyleSheet(
+                "color: #e5484d; font: 9px 'Segoe UI';"
             )
         if self._panel_shown:
             self._dismiss_timer.start(_AUTO_DISMISS_MS)
@@ -533,11 +567,16 @@ class OverlayWindow(QWidget):
             self._state_lbl.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
             )
+            self._bar_status.setText("Sent")
+            self._bar_status.setStyleSheet(
+                f"color: {_STATE_COLORS['done']}; font: 9px 'Segoe UI';"
+            )
         else:
             self._state_lbl.setText("No polished text")
             self._state_lbl.setStyleSheet(
                 "color: #e5484d; font: 11px 'Segoe UI'; font-weight: bold;"
             )
+            self._bar_status.setText("")
         self._send_btn.setEnabled(True)
         self._send_btn.setText("Send")
         if self._panel_shown:
@@ -550,6 +589,10 @@ class OverlayWindow(QWidget):
             self._state_lbl.setText("Copied")
             self._state_lbl.setStyleSheet(
                 f"color: {_STATE_COLORS['done']}; font: 11px 'Segoe UI'; font-weight: bold;"
+            )
+            self._bar_status.setText("Copied")
+            self._bar_status.setStyleSheet(
+                f"color: {_STATE_COLORS['done']}; font: 9px 'Segoe UI';"
             )
         else:
             self._state_lbl.setText("No polished text")
@@ -572,7 +615,9 @@ class OverlayWindow(QWidget):
         self._polishing = True
         self._polish_btn.setEnabled(False)
         self._polish_btn.setText("Polishing\u2026")
-        threading.Thread(target=self._run_polish, daemon=True, name="overlay-polish").start()
+        threading.Thread(
+            target=self._run_polish, daemon=True, name="overlay-polish"
+        ).start()
 
     def _run_polish(self) -> None:
         try:
@@ -589,7 +634,9 @@ class OverlayWindow(QWidget):
         self._polishing = True
         self._send_btn.setEnabled(False)
         self._send_btn.setText("Sending\u2026")
-        threading.Thread(target=self._run_send, daemon=True, name="overlay-send").start()
+        threading.Thread(
+            target=self._run_send, daemon=True, name="overlay-send"
+        ).start()
 
     def _run_send(self) -> None:
         try:
@@ -622,22 +669,18 @@ class OverlayWindow(QWidget):
         self._dismiss_timer.stop()
         self._stop_btn.setEnabled(False)
         self._stop_btn.setText("Stopping\u2026")
-        threading.Thread(target=self._stop_callback, daemon=True, name="overlay-stop").start()
+        threading.Thread(
+            target=self._stop_callback, daemon=True, name="overlay-stop"
+        ).start()
 
     def _on_close(self) -> None:
-        self._dismiss_timer.stop()
-        self.hide()
-        self._visible = False
-        self._panel_shown = False
+        self._collapse_to_bar()
 
     def _on_auto_dismiss(self) -> None:
-        self.hide()
-        self._visible = False
-        self._panel_shown = False
+        self._collapse_to_bar()
 
     # ── Force topmost via Win32 ─────────────────────────────────────────
     def _force_topmost(self) -> None:
-        """Use SetWindowPos(HWND_TOPMOST) to guarantee the overlay is visible."""
         try:
             hwnd = int(self.winId())
             _user32.SetWindowPos(
@@ -647,49 +690,24 @@ class OverlayWindow(QWidget):
         except Exception as e:
             log.debug("_force_topmost failed: %s", e)
 
-    # ── Placement ────────────────────────────────────────────────────────
-    def _place_near_cursor(self) -> None:
-        """Place the overlay at the bottom-center of the screen (Wispr Flow style).
-
-        Unlike following the cursor, this gives a consistent, predictable
-        position — the user always knows where to look.
-        """
-        self.adjustSize()
-        w, h = self.sizeHint().width(), self.sizeHint().height()
-        if w < 100:
-            w = 420
-        if h < 40:
-            h = 120
+    # ── Dock placement (fixed bottom-center, always) ───────────────────
+    def _place_dock(self, height: int) -> None:
+        """Position the window at bottom-center, ``height`` px above the
+        work-area bottom edge.  The window is resized to fit the current
+        content (bar / pill / review)."""
         area = _work_area()
         if area:
             left, top, right, bottom = area
         else:
             scr = QApplication.primaryScreen().virtualGeometry()
-            left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
-        margin = 80
+            left, top, right, bottom = (
+                scr.left(), scr.top(), scr.right(), scr.bottom(),
+            )
+        w = _DOCK_WIDTH
+        h = max(height, _IDLE_HEIGHT)
         px = left + (right - left - w) // 2
-        py = bottom - h - margin
+        py = bottom - h - _DOCK_MARGIN
         if py < top:
-            py = top + margin
-        self.move(px, py)
-
-    def _place_review_panel(self) -> None:
-        """Place the review panel at the bottom-center (same as live pill)."""
-        self.adjustSize()
-        w, h = self.sizeHint().width(), self.sizeHint().height()
-        if w < 100:
-            w = 420
-        if h < 40:
-            h = 200
-        area = _work_area()
-        if area:
-            left, top, right, bottom = area
-        else:
-            scr = QApplication.primaryScreen().virtualGeometry()
-            left, top, right, bottom = scr.left(), scr.top(), scr.right(), scr.bottom()
-        margin = 80
-        px = left + (right - left - w) // 2
-        py = bottom - h - margin
-        if py < top:
-            py = top + margin
+            py = top + _DOCK_MARGIN
+        self.setFixedSize(w, h)
         self.move(px, py)
