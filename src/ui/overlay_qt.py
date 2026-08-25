@@ -178,8 +178,8 @@ class _BarPage(QWidget):
         lay.setContentsMargins(14, 4, 14, 4)
         lay.setSpacing(8)
 
-        self._icon = QLabel("\u25b6")
-        self._icon.setStyleSheet("color: #30a46c; font: 11px 'Segoe UI';")
+        self._icon = QLabel("\u2581\u2583\u2585\u2587\u2585\u2583\u2581")
+        self._icon.setStyleSheet("color: #5a9e7a; font: 11px 'Segoe UI';")
         lay.addWidget(self._icon)
 
         self._label = QLabel("Dictation")
@@ -462,6 +462,8 @@ class OverlayWindow(QWidget):
 
         if state == "recording":
             self._set_interactive(True)
+            self._pill_page._stop_btn.setEnabled(True)
+            self._pill_page._stop_btn.setText("■ Stop")
             self._pill_page._stop_btn.show()
         else:
             self._make_click_through()
