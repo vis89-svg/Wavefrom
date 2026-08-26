@@ -112,8 +112,13 @@ def update_settings(**changes) -> Settings:
 
 
 # ------------------------------------------------------------------- api key
+def _parse_api_keys(raw: str) -> list[str]:
+    """Parse a comma-separated list of API keys, stripping whitespace."""
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
 def get_api_key() -> str:
-    """Order: keyring (Windows Credential Locker) -> GROQ_API_KEY env -> .env."""
+    """Order: keyring (Windows Credential Locker) -> GROQ_API_KEYS comma list env -> .env -> single GROQ_API_KEY env -> .env."""
     if _HAS_KEYRING:
         try:
             k = keyring.get_password(KEYRING_SERVICE, KEYRING_USER)
@@ -122,27 +127,37 @@ def get_api_key() -> str:
         except Exception as e:
             log.debug("keyring read failed: %s", e)
 
+    # Check comma-separated list from env var GROQ_API_KEYS
+    keys_env = os.getenv("GROQ_API_KEYS", "").strip()
+    if keys_env:
+        keys = _parse_api_keys(keys_env)
+        if keys:
+            return keys[0]
+
+    # Fall back to single GROQ_API_KEY env var
     if os.getenv("GROQ_API_KEY", "").strip():
         return os.getenv("GROQ_API_KEY", "").strip()
 
     load_dotenv(ENV_PATH)
-    key = os.getenv("GROQ_API_KEY", "").strip()
-    if key:
-        return key
-    # A UTF-8 BOM on the first line of .env breaks python-dotenv's parse of
-    # GROQ_API_KEY; read it directly as a fallback.
+    # Read .env with possible GROQ_API_KEYS or GROQ_API_KEY
     if ENV_PATH.is_file():
         try:
             for line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
                 k, _, v = line.partition("=")
-                if k.strip() == "GROQ_API_KEY" and v.strip():
-                    return v.strip()
+                kk = k.strip()
+                vv = v.strip()
+                if kk == "GROQ_API_KEYS":
+                    keys = _parse_api_keys(vv)
+                    if keys:
+                        return keys[0]
+                elif kk == "GROQ_API_KEY" and not os.getenv("GROQ_API_KEYS", "").strip():
+                    return vv
         except Exception:
             pass
     return ""
 
 
-def set_api_key(key: str) -> None:
+def set_api_key(key: str, index: int = 0) -> None:
     key = key.strip()
     if not key:
         raise ValueError("API key cannot be empty")
@@ -151,7 +166,23 @@ def set_api_key(key: str) -> None:
         log.info("API key stored in Windows Credential Locker")
     else:
         log.warning("keyring unavailable; persisting key to .env")
-        ENV_PATH.write_text(f"GROQ_API_KEY={key}\n", encoding="utf-8")
+        # Read existing keys from .env
+        existing_keys: list[str] = []
+        if ENV_PATH.is_file():
+            try:
+                for line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+                    k, _, v = line.partition("=")
+                    if k.strip() == "GROQ_API_KEYS":
+                        existing_keys = _parse_api_keys(v)
+            except Exception:
+                pass
+        # Append new key if not already present, respecting max 5 keys
+        if key not in existing_keys:
+            existing_keys.append(key)
+            if len(existing_keys) > 5:
+                existing_keys = existing_keys[-5:]  # keep last 5
+            ENV_PATH.write_text(f"GROQ_API_KEYS={','.join(existing_keys)}\n", encoding="utf-8")
+            log.info("API key appended to .env (max 5 keys stored)")
 
 
 def validate(config: Settings, api_key: str) -> list[str]:
@@ -159,6 +190,16 @@ def validate(config: Settings, api_key: str) -> list[str]:
     if config.use_cloud and not api_key:
         problems.append(
             "Groq API key is missing. Open Settings to add one.")
+    return problems
+
+
+def validate_cfg_keys(cfg: Settings) -> list[str]:
+    problems: list[str] = []
+    keys_env = os.getenv("GROQ_API_KEYS", "").strip()
+    single_key = os.getenv("GROQ_API_KEY", "").strip()
+    has_key = bool(keys_env or single_key)
+    if not has_key:
+        problems.append("GROQ_API_KEY is not set. Use Settings to add one or more keys.")
     return problems
 
 
