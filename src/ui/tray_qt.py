@@ -54,7 +54,7 @@ class TrayIcon(QObject):
         self._sig_set_state.connect(self._apply_state, Qt.ConnectionType.QueuedConnection)
         self._tray = QSystemTrayIcon()
         self._tray.setIcon(_make_icon())
-        self._tray.setToolTip("Dictation \u2014 idle")
+        self._tray.setToolTip("Waveform \u2014 idle")
 
         menu = QMenu()
         if on_show:
@@ -87,7 +87,7 @@ class TrayIcon(QObject):
     def _apply_state(self, state: str) -> None:
         color = STATE_COLORS.get(state, "#787878")
         self._tray.setIcon(_make_icon(color))
-        self._tray.setToolTip(f"Dictation \u2014 {state}")
+        self._tray.setToolTip(f"Waveform \u2014 {state}")
 
     def stop(self) -> None:
         self._tray.hide()

@@ -1,4 +1,4 @@
-# VoiceFlow Dictation
+# Waveform
 
 A free, Windows push-to-talk dictation app: hold a hotkey, speak, release — your words appear as clean, correctly punctuated text wherever your cursor is. Built on Groq's free-tier Whisper + LLM APIs instead of a paid subscription.
 
@@ -15,7 +15,7 @@ A free, Windows push-to-talk dictation app: hold a hotkey, speak, release — yo
 
 ## Install
 
-Grab the installer from the [latest release](https://github.com/vis89-svg/Wavefrom/releases/latest) — `VoiceFlow_Dictation_Installer.exe`. It's a per-user install (no admin rights needed for the installer itself).
+Grab the installer from the [latest release](https://github.com/vis89-svg/Wavefrom/releases/latest) — `Waveform_Installer.exe`. It's a per-user install (no admin rights needed for the installer itself).
 
 You'll need a free [Groq API key](https://console.groq.com/keys) — the app links you straight there from Settings the first time you need one.
 
@@ -44,7 +44,7 @@ To build the standalone `dictation.exe` and installer yourself:
 
 ```powershell
 .\build.ps1                              # produces dist\dictation.exe
-iscc voiceflow_install.iss               # produces Output\VoiceFlow_Dictation_Installer.exe (needs Inno Setup)
+iscc voiceflow_install.iss               # produces Output\Waveform_Installer.exe (needs Inno Setup)
 ```
 
 Releases are also built automatically by [GitHub Actions](.github/workflows/release.yml) — push a `v*` tag, or run the workflow manually from the Actions tab.

@@ -1,4 +1,4 @@
-APP_NAME = "VoiceFlow Dictation"
-APP_ID = "voiceflow.dictation"
+APP_NAME = "Waveform"
+APP_ID = "waveform.dictation"
 VERSION = "1.0.0"
 AUTHOR = "XgenF1"

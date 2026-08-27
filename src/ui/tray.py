@@ -51,7 +51,7 @@ class TrayIcon:
         self._icon = pystray.Icon(
             "dictation",
             self._make_image(),
-            "Dictation — idle",
+            "Waveform — idle",
             menu=pystray.Menu(
                 pystray.MenuItem("Remap hotkey", self._on_menu_remap),
                 pystray.Menu.SEPARATOR,
@@ -67,7 +67,7 @@ class TrayIcon:
         if self._icon:
             try:
                 self._icon.icon = self._make_image()
-                self._icon.title = f"Dictation — {self._state}"
+                self._icon.title = f"Waveform — {self._state}"
             except Exception as e:
                 log.debug("tray update failed: %s", e)
 

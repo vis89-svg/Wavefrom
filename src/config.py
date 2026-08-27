@@ -30,7 +30,8 @@ DEFAULT_WHISPER_MODEL = "whisper-large-v3-turbo"
 DEFAULT_CLEANUP_MODEL = "openai/gpt-oss-20b"
 DEFAULT_SAMPLE_RATE = 16000
 
-KEYRING_SERVICE = "VoiceFlowDictation"
+KEYRING_SERVICE = "Waveform"
+_LEGACY_KEYRING_SERVICE = "VoiceFlowDictation"  # pre-rename service name
 KEYRING_USER = "groq_api_key"
 
 try:
@@ -124,6 +125,15 @@ def get_api_key() -> str:
             k = keyring.get_password(KEYRING_SERVICE, KEYRING_USER)
             if k:
                 return k
+            # One-time migration: the app was renamed, so pick up a key saved
+            # under the old service name and re-save it under the new one.
+            legacy = keyring.get_password(_LEGACY_KEYRING_SERVICE, KEYRING_USER)
+            if legacy:
+                try:
+                    keyring.set_password(KEYRING_SERVICE, KEYRING_USER, legacy)
+                except Exception as e:
+                    log.debug("keyring migration write failed: %s", e)
+                return legacy
         except Exception as e:
             log.debug("keyring read failed: %s", e)
 
@@ -212,6 +222,8 @@ def validate_config(cfg: Settings) -> list[str]:
 
 # ------------------------------------------------------------------ autostart
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_VALUE = "Waveform"
+_LEGACY_AUTOSTART_VALUE = "VoiceFlowDictation"  # pre-rename value name
 
 
 def autostart_set(enabled: bool) -> None:
@@ -224,12 +236,18 @@ def autostart_set(enabled: bool) -> None:
                 cmd = f'"{sys.executable}" dictate'
             else:
                 cmd = f'"{sys.executable}" -m src.main dictate'
-            winreg.SetValueEx(k, "VoiceFlowDictation", 0, winreg.REG_SZ, cmd)
+            winreg.SetValueEx(k, AUTOSTART_VALUE, 0, winreg.REG_SZ, cmd)
         else:
             try:
-                winreg.DeleteValue(k, "VoiceFlowDictation")
+                winreg.DeleteValue(k, AUTOSTART_VALUE)
             except FileNotFoundError:
                 pass
+        # Clean up the pre-rename entry either way, so an upgraded install
+        # never ends up with two autostart entries under two names.
+        try:
+            winreg.DeleteValue(k, _LEGACY_AUTOSTART_VALUE)
+        except FileNotFoundError:
+            pass
 
 
 def autostart_enabled() -> bool:
@@ -238,8 +256,12 @@ def autostart_enabled() -> bool:
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0,
                             winreg.KEY_READ) as k:
-            winreg.QueryValueEx(k, "VoiceFlowDictation")
-        return True
+            try:
+                winreg.QueryValueEx(k, AUTOSTART_VALUE)
+                return True
+            except FileNotFoundError:
+                winreg.QueryValueEx(k, _LEGACY_AUTOSTART_VALUE)
+                return True
     except FileNotFoundError:
         return False
 

@@ -60,7 +60,7 @@ class MainWindow(QMainWindow):
     def __init__(self, history_page: QWidget, settings_page: QWidget,
                  display_name: str = "") -> None:
         super().__init__()
-        self.setWindowTitle("VoiceFlow Dictation")
+        self.setWindowTitle("Waveform")
         self.setMinimumSize(800, 520)
         self.setStyleSheet(_SHELL_STYLE)
 
@@ -78,7 +78,7 @@ class MainWindow(QMainWindow):
         sb_lay.setContentsMargins(12, 20, 12, 20)
         sb_lay.setSpacing(4)
 
-        app_title = QLabel("VoiceFlow")
+        app_title = QLabel("Waveform")
         app_title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         app_title.setStyleSheet("color: #e6e9ee;")
         sb_lay.addWidget(app_title)

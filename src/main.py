@@ -1,4 +1,4 @@
-"""VoiceFlow Dictation — production entrypoint.
+"""Waveform — production entrypoint.
 
 Commands:
   transcribe <file.wav>   One-shot file transcription (diagnostics)

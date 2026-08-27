@@ -3,7 +3,7 @@ import os
 import sys
 
 desktop = os.path.join(os.environ.get('USERPROFILE', ''), 'Desktop')
-lnk_path = os.path.join(desktop, 'VoiceFlow Dictation.lnk')
+lnk_path = os.path.join(desktop, 'Waveform.lnk')
 exe_path = r'E:\XgenF1\dist\dictation.exe'
 
 try:

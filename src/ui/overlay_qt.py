@@ -2,7 +2,7 @@
 
 Three visual modes in a single always-on-top window fixed at bottom-center
 (~2 cm above the taskbar):
-  1. **Idle bar** -- thin pill with waveform icon + "Dictation" label, always
+  1. **Idle bar** -- thin pill with waveform icon + "Waveform" label, always
      visible.
   2. **Live indicator** -- expands in-place to show animated waveform, state
      label, and Stop button during recording / transcribing / cleaning.
@@ -182,7 +182,7 @@ class _BarPage(QWidget):
         self._icon.setStyleSheet("color: #5a9e7a; font: 11px 'Segoe UI';")
         lay.addWidget(self._icon)
 
-        self._label = QLabel("Dictation")
+        self._label = QLabel("Waveform")
         self._label.setStyleSheet("color: #8a8f98; font: 10px 'Segoe UI';")
         lay.addWidget(self._label)
         lay.addStretch()

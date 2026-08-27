@@ -279,7 +279,7 @@ class DictationEngine:
                     continue
                 log.warning("Slice transcription failed: %s", e)
                 self._status.state = "error"
-                self.notify("Dictation",
+                self.notify("Waveform",
                             "Transcription failed. Check rate limits / network.")
                 self._notify_tray()
                 return
@@ -455,7 +455,7 @@ class DictationEngine:
         if not title or len(title) > 60:
             return ""
         lowered = title.lower()
-        if any(tok in lowered for tok in ("dictat", "settings", "voiceflow")):
+        if any(tok in lowered for tok in ("dictat", "settings", "voiceflow", "waveform")):
             return ""
         return title
 

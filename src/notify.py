@@ -115,7 +115,7 @@ def toast(title: str, message: str, timeout_secs: int = 4) -> None:
         nid.uTimeout = timeout_secs * 1000
         nid.szInfoTitle = title[: MAX_TITLE - 1]
         nid.szInfo = message[: MAX_MSG - 1]
-        nid.szTip = "Dictation"
+        nid.szTip = "Waveform"
         nid.dwInfoFlags = 0x00000001  # NIIF_INFO
         threading.Thread(target=_toast_thread_worker, args=(nid,), daemon=True).start()
     except Exception:
