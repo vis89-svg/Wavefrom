@@ -216,6 +216,13 @@ class SettingsPage(QWidget):
         self._key_edit.setPlaceholderText("Enter Groq API key")
         fl4.addRow("API key:", self._key_edit)
 
+        self._key_hint = QLabel(
+            'Don\'t have a key? '
+            '<a href="https://console.groq.com/keys">Get a free one &rarr;</a>'
+        )
+        self._key_hint.setOpenExternalLinks(True)
+        fl4.addRow("", self._key_hint)
+
         key_row = QHBoxLayout()
         self._show_key_chk = QCheckBox("Show")
         self._show_key_chk.toggled.connect(

@@ -12,6 +12,7 @@ import ctypes
 import json
 import logging
 import logging.handlers
+import os
 import sys
 import threading
 import time
@@ -20,6 +21,14 @@ from dataclasses import fields
 from pathlib import Path
 
 import keyboard
+from dotenv import load_dotenv
+
+try:
+    import sentry_sdk
+    _HAS_SENTRY = True
+except ImportError:
+    sentry_sdk = None
+    _HAS_SENTRY = False
 
 from src.cleanup import CleanupClient
 from src.config import (ENV_PATH, LOGS_DIR, Settings, autostart_enabled, autostart_set,
@@ -48,10 +57,30 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
+def init_sentry() -> None:
+    """Opt-in crash reporting: no-ops unless SENTRY_DSN is set in .env."""
+    if not _HAS_SENTRY:
+        return
+    load_dotenv(ENV_PATH)
+    dsn = os.getenv("SENTRY_DSN", "").strip()
+    if not dsn:
+        return
+    try:
+        sentry_sdk.init(dsn=dsn, traces_sample_rate=0, release=VERSION)
+        log.info("Sentry crash reporting enabled")
+    except Exception as e:
+        log.debug("Sentry init failed: %s", e)
+
+
 def install_crash_hook() -> None:
     def hook(exc_type, exc, tb) -> None:
         msg = "".join(traceback.format_exception(exc_type, exc, tb))
         log.critical("Unhandled exception:\n%s", msg)
+        if _HAS_SENTRY:
+            try:
+                sentry_sdk.capture_exception(exc)
+            except Exception:
+                pass
         try:
             toast_win(f"{APP_NAME} error", f"{exc_type.__name__}: {exc}")
         except Exception:
@@ -529,6 +558,9 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
                  f"Ready. Hold {current_settings['hotkey']} or tap "
                  f"{current_settings['live_hotkey']} for live typing.")
 
+    from src.update_check import check_for_updates_async
+    check_for_updates_async()
+
     # Main app shell window (History + Settings pages)
     main_win = None
     try:
@@ -576,6 +608,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
 
 
 def main() -> int:
+    init_sentry()
     install_crash_hook()
     parser = argparse.ArgumentParser(prog="dictation",
                                      description=f"{APP_NAME} v{VERSION}")

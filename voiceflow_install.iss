@@ -25,7 +25,9 @@ Name: "{group}\VoiceFlow Dictation"; Filename: "{app}\dictation.exe"
 ; Files
 [Files]
 Source: "dist\dictation.exe"; DestDir: "{app}"
-Source: "dist\.env"; DestDir: "{app}"
+; Ship the blank template, never a real key -- each user gets their own via
+; the "Get a free API key" link in Settings.
+Source: ".env.example"; DestDir: "{app}"; DestName: ".env"
 ; Include the app icon
 Source: "assets\app.ico"; DestDir: "{app}"
 ; User strings
