@@ -476,6 +476,9 @@ class OverlayWindow(QWidget):
     def _show_panel(self, text: str) -> None:
         """Expand to the review panel."""
         self._stack.setCurrentIndex(2)
+        # The prior state (e.g. "cleaning") leaves the window click-through;
+        # the review panel's Polish/Send/Clipboard buttons need real clicks.
+        self._set_interactive(True)
 
         self._review_page._txt.setPlainText((text or "").strip())
         self._polishing = False

@@ -65,6 +65,10 @@ POLISH_PROMPT = (
     "corrected version and drop the superseded part that the speaker rejected.\n"
     "- NEVER invent content that was not said or implied; do not add ideas, "
     "examples, or facts. When a word is plausibly correct, keep it.\n"
+    "- NEVER omit, shorten, or summarize any part of the transcript. Every "
+    "sentence and idea in the input must have a corresponding sentence in "
+    "your output — polishing means rewriting each one more cleanly, not "
+    "dropping any of them, no matter how repetitive or informal they seem.\n"
     "- Output only the polished text, nothing else.\n"
 )
 
