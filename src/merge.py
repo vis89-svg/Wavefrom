@@ -157,6 +157,41 @@ def _is_subsequence(needle: list[str], hay: list[str]) -> bool:
 
 MIN_REPEAT_WORDS = 3
 
+# A small, well-documented set of stock phrases Whisper tends to "hallucinate"
+# on silence/noise/low-information audio -- an artifact of its training data
+# (much of it YouTube auto-captions whose silent/outro sections were captioned
+# with exactly these lines). Only ever suppressed when a slice/chunk's ENTIRE
+# normalized text matches one of these, never as a substring inside a real
+# sentence, so genuine speech is never touched.
+_HALLUCINATION_FILLERS = {
+    "thank you",
+    "thanks",
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "dont forget to subscribe",
+    "see you next time",
+    "see you in the next video",
+    "thanks for listening",
+    "bye bye",
+    "goodbye everyone",
+    "music",
+    "applause",
+    "laughter",
+    "subtitles by the amaraorg community",
+}
+
+
+def is_hallucinated_filler(text: str) -> bool:
+    """True if `text`'s entire normalized content is a known Whisper filler
+    hallucination (see `_HALLUCINATION_FILLERS`) -- i.e. nothing else was
+    transcribed in this slice/chunk besides the stock phrase."""
+    words = [w for w in (_norm(w) for w in tokenize(text)) if w]
+    if not words:
+        return False
+    return " ".join(words) in _HALLUCINATION_FILLERS
+
 
 def strip_trailing_repeat(text: str) -> str:
     """Drop a trailing verbatim repeat of an earlier span (Whisper echo loop).

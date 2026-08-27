@@ -22,8 +22,9 @@ import sounddevice as sd
 
 from src.merge import (PUNCT, MIN_REPEAT_WORDS, _norm, apply_disputes,
                        collapse_adjacent_repeats, diff_plan, ensure_period,
-                       find_disputed_blocks, merge_segments,
-                       strip_trailing_repeat, tokenize, union_text)
+                       find_disputed_blocks, is_hallucinated_filler,
+                       merge_segments, strip_trailing_repeat, tokenize,
+                       union_text)
 
 log = logging.getLogger(__name__)
 
@@ -36,13 +37,15 @@ MAX_PROMPT_CHARS = 400
 FINAL_CHUNK_SECS = 20.0
 FINAL_CHUNK_OVERLAP_SECS = 2.0
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
+_NO_SPEECH_PROB_THRESHOLD = 0.6  # Whisper's own "probably not speech" signal
 _ECHO_TAIL_WORDS = 15  # how many committed words a prompt echo may repeat
 _FULL_PROMPT_ECHO_RATIO = 0.90  # slice ~identical to the whole prompt = echo
 _LEVEL_REPORT_EVERY = 0.1  # seconds between overlay level updates
 
 
 def _low_conf_words(result) -> set[str]:
-    """Normalized words from segments with an uncertain decode (low logprob).
+    """Normalized words from segments with an uncertain decode (low logprob
+    or a high Whisper-reported no-speech probability).
 
     These are the regions most likely to contain substitutions or
     hallucinations; the reconciliation prompt uses the set to tell the LLM
@@ -50,7 +53,12 @@ def _low_conf_words(result) -> set[str]:
     """
     low: set[str] = set()
     for seg in getattr(result, "segments", []):
-        if seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONF_LOGPROB:
+        uncertain = (
+            (seg.avg_logprob is not None and seg.avg_logprob < _LOW_CONF_LOGPROB)
+            or (seg.no_speech_prob is not None
+                and seg.no_speech_prob >= _NO_SPEECH_PROB_THRESHOLD)
+        )
+        if uncertain:
             low.update(_norm(w) for w in seg.text.split())
     return low
 
@@ -251,11 +259,17 @@ class DictationEngine:
         self._status.state = "transcribing"
         self._notify_tray()
         prompt = self._context_prompt()
-        text = None
+        kwargs: dict = {"language": self._config.language, "prompt": prompt}
+        if not self._local:
+            # Verbose gets Whisper's own per-segment no_speech_prob back, so a
+            # slice that Whisper itself flags as "probably not speech" (the
+            # classic silence/noise hallucination trigger) can be dropped
+            # instead of typed.
+            kwargs["verbose"] = True
+        result = None
         for attempt in range(2):
             try:
-                text = self._transcriber.transcribe_bytes(
-                    wav_bytes, language=self._config.language, prompt=prompt)
+                result = self._transcriber.transcribe_bytes(wav_bytes, **kwargs)
                 break
             except Exception as e:
                 if attempt == 0 and _is_rate_limit(e):
@@ -269,7 +283,21 @@ class DictationEngine:
                             "Transcription failed. Check rate limits / network.")
                 self._notify_tray()
                 return
-        if text is None:
+        if result is None:
+            return
+
+        if isinstance(result, str):
+            text = result
+            no_speech_probs: list[float] = []
+        else:  # TranscriptResult with confidence metadata
+            text = result.text
+            no_speech_probs = [s.no_speech_prob for s in result.segments
+                               if s.no_speech_prob is not None]
+
+        if text.strip() and no_speech_probs and \
+                all(p >= _NO_SPEECH_PROB_THRESHOLD for p in no_speech_probs):
+            log.info("Slice flagged as no-speech by Whisper (p>=%.1f); "
+                     "ignoring: %r", _NO_SPEECH_PROB_THRESHOLD, text)
             return
 
         if self._local:
@@ -285,9 +313,15 @@ class DictationEngine:
             # A transcript that is only words we already sent as the Whisper
             # prompt is the model echoing the prompt back, not new speech.
             # Real speech that merely matches glossary/hint words is NOT an
-            # echo — the user legitimately says those words.
+            # echo — the user legitimately says those words. A transcript
+            # that is nothing but a known Whisper hallucination filler (e.g.
+            # "Thank you.") is dropped the same way -- only when it's the
+            # slice's ENTIRE content, never as part of a real sentence.
             if text.strip() and self._is_prompt_echo(text, prompt):
                 log.info("Slice is a prompt echo; ignoring: %r", text)
+            elif text.strip() and is_hallucinated_filler(text):
+                log.info("Slice looks like a Whisper hallucination filler; "
+                         "ignoring: %r", text)
             else:
                 old_committed = self._committed
                 # 0.4s of audio overlap is only a few words; cap the overlap
@@ -302,6 +336,11 @@ class DictationEngine:
                 if appended.strip() and self._is_prompt_echo(appended, prompt):
                     log.info("Slice tail is a prompt echo; dropping: %r",
                              appended)
+                    committed = old_committed
+                    appended = ""
+                elif appended.strip() and is_hallucinated_filler(appended):
+                    log.info("Slice tail looks like a Whisper hallucination "
+                             "filler; dropping: %r", appended)
                     committed = old_committed
                     appended = ""
                 self._committed = committed
@@ -907,6 +946,10 @@ class DictationEngine:
                 # before stitching, so they can't leak into mid-text when the
                 # chunk is merged with the next one.
                 text = strip_trailing_repeat(collapse_adjacent_repeats(text))
+                if text.strip() and is_hallucinated_filler(text):
+                    log.info("Chunk looks like a Whisper hallucination "
+                             "filler; ignoring: %r", text)
+                    text = ""
                 committed, _ = merge_segments(committed, text, max_overlap=24)
             i += chunk_len - overlap
         return " ".join(committed), low_conf
