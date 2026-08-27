@@ -18,7 +18,7 @@ from src.version import APP_NAME, VERSION
 
 log = logging.getLogger(__name__)
 
-_REPO = "vis89-svg/DictatioN"
+_REPO = "vis89-svg/Wavefrom"
 _RELEASES_URL = f"https://api.github.com/repos/{_REPO}/releases/latest"
 _TIMEOUT_SECS = 5
 
