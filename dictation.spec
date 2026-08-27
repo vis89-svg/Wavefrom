@@ -42,4 +42,5 @@ exe = EXE(
     # Run elevated so the global keyboard hook + SendInput can also reach
     # admin/elevated windows (else dictation silently fails there).
     uac_admin=True,
+    icon="assets\\app.ico",
 )

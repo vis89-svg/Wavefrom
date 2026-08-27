@@ -14,6 +14,8 @@ DefaultDirName={userpf}\VoiceFlow Dictation
 DefaultGroupName=VoiceFlow Dictation
 ; Output base filename
 OutputBaseFilename=VoiceFlow_Dictation_Installer
+; Installer wizard icon
+SetupIconFile=assets\app.ico
 ; Default language
 ; Languages
 ; Installable languages

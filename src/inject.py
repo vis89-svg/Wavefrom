@@ -271,6 +271,7 @@ def paste_text(text: str) -> None:
     try:
         import pyperclip
     except ImportError:
+        log.warning("pyperclip unavailable; falling back to slow char-by-char retype")
         inject_text(text)
         return
     try:
@@ -279,7 +280,8 @@ def paste_text(text: str) -> None:
         previous = None
     try:
         pyperclip.copy(text)
-    except Exception:
+    except Exception as e:
+        log.warning("Clipboard copy failed (%s); falling back to slow char-by-char retype", e)
         inject_text(text)
         return
     _send_key(VK_CONTROL, False)
