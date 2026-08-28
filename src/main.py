@@ -436,6 +436,9 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
     if transcriber is None:
         return 1
     log.info("Pipeline ready; building engine...")
+    if not settings.local_engine:
+        from src.streaming import warm_up_transcriber
+        warm_up_transcriber(transcriber)
 
     import src.history as history_mod
 

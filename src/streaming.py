@@ -90,6 +90,7 @@ class DictationEngine:
         self._slice_q: queue.Queue[bytes | None] = queue.Queue()
         self._committed: list[str] = []
         self._typed_text = ""
+        self._typed_context: dict | None = None
         self._typed_chars = 0
         self._full_audio: bytes | None = None
         self._last_disputes: list = []
@@ -125,6 +126,7 @@ class DictationEngine:
         # session stay in _committed and leak into the next prompt/merge.
         self._committed = []
         self._typed_text = ""
+        self._typed_context = None
         self._typed_chars = 0
         self._full_audio = None
         self._last_disputes = []
@@ -367,13 +369,17 @@ class DictationEngine:
             else:
                 sep = "" if (not self._typed_text or self._typed_text.endswith(" ")
                              or appended.startswith(" ")) else " "
-                self._injector.inject_text(sep + appended)
-                self._typed_chars += len(sep + appended)
-                # Track the literal screen text, never the whole committed
-                # text: committed may contain deferred content that is not on
-                # screen, and the final diff must only ever delete what was
-                # actually typed by this session.
-                self._typed_text = self._typed_text + sep + appended
+                if self._injector.inject_text(sep + appended):
+                    self._typed_chars += len(sep + appended)
+                    # Track the literal screen text, never the whole committed
+                    # text: committed may contain deferred content that is not
+                    # on screen, and the final diff must only ever delete what
+                    # was actually typed by this session.
+                    self._typed_text = self._typed_text + sep + appended
+                else:
+                    log.error("Slice inject_text timed out; ledger and "
+                             "on-screen bookkeeping not advanced for this "
+                             "slice's text")
                 log.info("Typed slice text (%d chars); session ledger=%d",
                          len(sep + appended), self._typed_chars)
         elif not self._injector:
@@ -536,8 +542,7 @@ class DictationEngine:
 
             now = capture_typing_context()
             window_ok, caret_ok = self._context_matches(baseline, now)
-            if window_ok and caret_ok:
-                self._injector.inject_text(quick)
+            if window_ok and caret_ok and self._injector.inject_text(quick):
                 typed = quick
                 self._typed_chars = len(quick)
                 log.info("Pre-typed cleaned text (%d chars)", len(quick))
@@ -570,12 +575,16 @@ class DictationEngine:
                 tail = ""  # can't cleanly append; the final diff reconciles
             if tail:
                 try:
-                    self._injector.inject_text(tail)
+                    ok = self._injector.inject_text(tail)
                 except Exception as e:
                     log.warning("Early finalize typing failed: %s", e)
-                else:
+                    ok = False
+                if ok:
                     self._typed_chars += len(tail)
                     typed = raw
+                else:
+                    log.error("Early-type inject_text did not complete; "
+                             "ledger and on-screen bookkeeping not advanced")
             log.info("Early-type: typed=%d raw=%d tail=%d ledger=%d",
                      len(typed), len(raw), len(tail), self._typed_chars)
 
@@ -677,9 +686,9 @@ class DictationEngine:
             to_delete, to_type = diff_plan(typed, final)
             if to_delete or to_type:
                 window_ok = caret_ok = ledger_ok = True
+                from src.inject import capture_typing_context
+                now = capture_typing_context()
                 if baseline is not None:
-                    from src.inject import capture_typing_context
-                    now = capture_typing_context()
                     window_ok, caret_ok = self._context_matches(baseline, now)
                 if to_delete > self._typed_chars:
                     ledger_ok = False
@@ -689,17 +698,33 @@ class DictationEngine:
                          len(typed) - to_delete, to_delete, len(to_type),
                          self._typed_chars, window_ok, caret_ok)
                 if window_ok and caret_ok and ledger_ok:
+                    delete_ok = True
                     if to_delete:
-                        self._injector.delete_chars(to_delete)
+                        delete_ok = self._injector.delete_chars(to_delete)
                         self._typed_chars = max(0, self._typed_chars - to_delete)
-                    if to_type:
+                    paste_ok = True
+                    if delete_ok and to_type:
                         # Paste instead of char-by-char: this is a correction
                         # replacing text already on screen, so a multi-second
                         # visible retype is exactly the "removes the whole
                         # typed one" flicker — a paste makes the swap instant.
-                        self._injector.paste_text(to_type)
-                        self._typed_chars += len(to_type)
-                    typed = final
+                        paste_ok = self._injector.paste_text(to_type)
+                        if paste_ok:
+                            self._typed_chars += len(to_type)
+                    if delete_ok and paste_ok:
+                        typed = final
+                        self._typed_context = now
+                    else:
+                        # delete or paste was abandoned after timing out (see
+                        # inject.py's _run_with_timeout): the screen is now in
+                        # an unknown, possibly half-corrected state. `typed`
+                        # must NOT be set to `final` here -- that would claim
+                        # the screen shows the corrected text when it might
+                        # not, corrupting every diff after this one.
+                        log.error("Correction only partially applied "
+                                 "(delete_ok=%s paste_ok=%s); screen and "
+                                 "bookkeeping may now be out of sync",
+                                 delete_ok, paste_ok)
                 else:
                     # The screen no longer matches the engine's bookkeeping (focus
                     # moved, caret moved, or the bookkeeping claims more text than
@@ -790,13 +815,26 @@ class DictationEngine:
                      to_delete, len(to_type), self._typed_chars,
                      window_ok, caret_ok)
             if window_ok and caret_ok and ledger_ok:
+                delete_ok = True
                 if to_delete:
-                    self._injector.delete_chars(to_delete)
+                    delete_ok = self._injector.delete_chars(to_delete)
                     self._typed_chars = max(0, self._typed_chars - to_delete)
-                if to_type:
-                    self._injector.paste_text(to_type)
-                    self._typed_chars += len(to_type)
-                self._typed_text = polished
+                paste_ok = True
+                if delete_ok and to_type:
+                    paste_ok = self._injector.paste_text(to_type)
+                    if paste_ok:
+                        self._typed_chars += len(to_type)
+                if delete_ok and paste_ok:
+                    self._typed_text = polished
+                    self._typed_context = now
+                else:
+                    # See _finalize_impl's identical guard: a timed-out delete
+                    # or paste leaves the screen in an unknown state, so
+                    # _typed_text must not be claimed as `polished` here.
+                    log.error("Polish correction only partially applied "
+                             "(delete_ok=%s paste_ok=%s); screen and "
+                             "bookkeeping may now be out of sync",
+                             delete_ok, paste_ok)
             else:
                 log.warning("Polish skipped (window=%s caret=%s ledger=%s); "
                             "on-screen text left as-is", window_ok, caret_ok,
@@ -810,9 +848,15 @@ class DictationEngine:
     def send(self) -> str | None:
         """Type the last polished text at the current caret position.
 
-        Unlike Polish, this bypasses the window/caret/ledger guards and simply
-        injects the polished text. Returns the text typed, or None when no
-        polished text is available.
+        If the caret is still where the engine last left it (same window,
+        same spot), this replaces that on-screen text via a guarded diff --
+        same as Polish -- instead of blindly pasting on top of it (which
+        doubled the text: the old on-screen copy plus a fresh paste of the
+        same content). If the caret has moved to a genuinely different
+        window/spot (or no prior on-screen state is known), falls back to a
+        plain paste of the full text, since there's nothing of ours there to
+        replace. Returns the text typed, or None when no polished text is
+        available.
         """
         if not self._cleaner:
             log.warning("Send unavailable: cleanup is disabled")
@@ -822,7 +866,41 @@ class DictationEngine:
             log.info("Send: no polished text yet; run Polish first")
             return None
         if self._injector:
-            self._injector.paste_text(polished)
+            from src.inject import capture_typing_context
+            now = capture_typing_context()
+            same_spot = False
+            if self._typed_context is not None:
+                window_ok, caret_ok = self._context_matches(self._typed_context, now)
+                same_spot = window_ok and caret_ok
+            if same_spot:
+                to_delete, to_type = diff_plan(self._typed_text, polished)
+                if to_delete > self._typed_chars:
+                    same_spot = False  # bookkeeping doesn't add up; don't backspace blind
+            ok = True
+            if same_spot:
+                delete_ok = True
+                if to_delete:
+                    delete_ok = self._injector.delete_chars(to_delete)
+                    self._typed_chars = max(0, self._typed_chars - to_delete)
+                paste_ok = True
+                if delete_ok and to_type:
+                    paste_ok = self._injector.paste_text(to_type)
+                    if paste_ok:
+                        self._typed_chars += len(to_type)
+                ok = delete_ok and paste_ok
+            else:
+                ok = self._injector.paste_text(polished)
+                if ok:
+                    self._typed_chars = len(polished)
+            if ok:
+                self._typed_text = polished
+                self._typed_context = now
+            else:
+                # Same reasoning as _finalize_impl/polish(): a timed-out
+                # delete/paste leaves the screen state unknown, so don't
+                # claim _typed_text now matches `polished`.
+                log.error("Send only partially applied; screen and "
+                         "bookkeeping may now be out of sync")
         log.info("Send: typed polished text (%d chars)", len(polished))
         self._status.state = "idle"
         self._notify_tray()
@@ -1119,6 +1197,33 @@ def _to_wav(audio: np.ndarray, rate: int) -> bytes:
         w.setframerate(rate)
         w.writeframes(audio.tobytes())
     return buf.getvalue()
+
+
+def warm_up_transcriber(transcriber) -> None:
+    """Fire a tiny throwaway transcription request in the background right
+    after startup.
+
+    The first real dictation of a session has consistently taken ~10-14s
+    longer than every one after it (confirmed: not network/DNS/TLS -- all
+    under 200ms measured directly -- and not audio device init, also under
+    200ms measured directly). Whatever the actual cause (a cold path
+    somewhere between this process and Groq's inference, security software
+    scrutinizing this process's first outbound connection, etc.), the fix
+    that works regardless of the exact cause is the same: pay that one-time
+    cost silently at launch, before the user is waiting on it, instead of
+    during their first real dictation. Runs on a daemon thread; any failure
+    here is harmless and silent -- it's not on the critical path for
+    anything.
+    """
+    def _warm() -> None:
+        try:
+            silence = np.zeros(int(16000 * 0.3), dtype="int16")
+            transcriber.transcribe_bytes(_to_wav(silence, 16000))
+            log.debug("Transcriber warm-up request completed")
+        except Exception as e:
+            log.debug("Transcriber warm-up failed (harmless): %s", e)
+
+    threading.Thread(target=_warm, daemon=True, name="warmup").start()
 
 
 def _is_contiguous_run(tokens: list[str], tail: list[str]) -> bool:

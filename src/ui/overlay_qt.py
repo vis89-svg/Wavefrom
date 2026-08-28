@@ -532,7 +532,12 @@ class OverlayWindow(QWidget):
             self._bar_page._status.setStyleSheet(
                 "color: #e5484d; font: 9px 'Segoe UI';"
             )
-        self._dismiss_timer.start(_AUTO_DISMISS_MS)
+        # No auto-dismiss restart here: the user just deliberately asked to see
+        # this result (unlike the automatic post-cleanup panel, where nobody
+        # explicitly asked and auto-hiding if ignored is reasonable). Restarting
+        # a 15s countdown here meant the panel could silently re-collapse while
+        # the user's attention was on the target app watching the on-screen
+        # text update, making a *successful* Polish look like it never updated.
 
     def _apply_send_result(self, text: str | None, session_id: int) -> None:
         if session_id != self._session_id:
@@ -557,7 +562,7 @@ class OverlayWindow(QWidget):
         self._review_page._send_btn.setEnabled(True)
         self._review_page._send_btn.setText("Send")
         self._review_page._txt.setPlainText((text or "").strip())
-        self._dismiss_timer.start(_AUTO_DISMISS_MS)
+        # No auto-dismiss restart: see _apply_polish_result.
 
     def _apply_clipboard_result(self, text: str | None, session_id: int) -> None:
         if session_id != self._session_id:

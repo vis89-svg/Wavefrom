@@ -45,12 +45,15 @@ class FakeInjector:
 
     def inject_text(self, text):
         self.parts.append(text)
+        return True
 
     def paste_text(self, text):
         self.parts.append(text)
+        return True
 
     def delete_chars(self, n):
         self.deleted += n
+        return True
 
     @property
     def typed(self):
