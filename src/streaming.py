@@ -23,8 +23,7 @@ import sounddevice as sd
 from src.merge import (PUNCT, MIN_REPEAT_WORDS, _norm, apply_disputes,
                        collapse_adjacent_repeats, diff_plan, ensure_period,
                        find_disputed_blocks, is_hallucinated_filler,
-                       merge_segments, strip_trailing_repeat, tokenize,
-                       union_text)
+                       merge_segments, strip_trailing_repeat, tokenize)
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +33,7 @@ SILENCE_PERIOD_SECS = 1.5
 MAX_SILENCE_SECS = 5.0
 MAX_RECORD_SECS = 120.0
 MAX_PROMPT_CHARS = 400
-FINAL_CHUNK_SECS = 20.0
-FINAL_CHUNK_OVERLAP_SECS = 2.0
+TRIM_PAD_SECS = 0.3  # silence kept around speech when trimming the final pass
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
 _NO_SPEECH_PROB_THRESHOLD = 0.6  # Whisper's own "probably not speech" signal
 _ECHO_TAIL_WORDS = 15  # how many committed words a prompt echo may repeat
@@ -511,22 +509,19 @@ class DictationEngine:
         if (self._injector and wav_bytes and raw and not self._hold_active
                 and not typed and self._cleaner):
             # Nothing is on screen yet (hold mode never types live) and a
-            # cleaner is configured: run cleanup BEFORE typing anything, so
-            # the very first text the user sees is already correct instead of
-            # typing raw text and then visibly swapping it out afterward.
+            # cleaner is configured: run the full-audio pass and cleanup
+            # BEFORE typing anything, so the very first text the user sees is
+            # already the accurate one instead of the slice draft visibly
+            # swapped out afterward.
             self._wait_hold_release()
-            quick_base = raw
-            if quick_base[-1] not in PUNCT:
-                quick_base += "."
-            correction_map = getattr(self._config, "correction_map", None) or {}
-            for wrong, right in correction_map.items():
-                quick_base = quick_base.replace(wrong, right)
-            from src.merge import fuzzy_glossary_replace
-            glossary = getattr(self._config, "glossary", None) or []
-            quick_base = fuzzy_glossary_replace(quick_base, glossary)
-
             from src.inject import capture_typing_context
             baseline = capture_typing_context()
+            quick_base = self._full_pass(wav_bytes) or raw
+            quick_base = strip_trailing_repeat(collapse_adjacent_repeats(quick_base))
+            if quick_base[-1] not in PUNCT:
+                quick_base += "."
+            quick_base = self._apply_corrections(quick_base)
+
             self._status.state = "cleaning"
             self._overlay_state("cleaning", self._status.committed_text)
             self._notify_tray()
@@ -588,84 +583,28 @@ class DictationEngine:
             log.info("Early-type: typed=%d raw=%d tail=%d ledger=%d",
                      len(typed), len(raw), len(tail), self._typed_chars)
 
-        final = raw
-        heavy_pass_changed = False
-        if wav_bytes:
-            # Skip expensive full-audio re-transcription for short dictations
-            # (< 12s) — streaming slices already covered it well with overlap.
-            pcm, rate = pcm_from_wav(wav_bytes)
-            audio_secs = len(pcm) / rate if rate else 0
-            if audio_secs >= 12.0:
-                self._status.state = "transcribing"
-                self._overlay_state("transcribing", self._status.committed_text)
-                self._notify_tray()
-                try:
-                    if self._verify_enabled():
-                        # Primary and verify are independent decodes of the
-                        # SAME audio — running them one after another (as
-                        # before) doubles the wait for no reason. Running
-                        # them concurrently cuts that part of the lag
-                        # roughly in half without skipping either decode.
-                        with concurrent.futures.ThreadPoolExecutor(
-                                max_workers=2) as pool:
-                            primary_future = pool.submit(
-                                self._transcribe_full_audio, wav_bytes)
-                            verify_future = pool.submit(
-                                self._transcribe_full_audio, wav_bytes,
-                                model=self._verify_model(), temperature=0.4)
-                            # A primary failure is fatal to this whole pass
-                            # (same as before: propagates to the except
-                            # below, falling back to the streaming
-                            # transcript). A verify failure alone must not
-                            # discard a good primary result.
-                            full_text, primary_low = primary_future.result()
-                            try:
-                                verify_text, verify_low = verify_future.result()
-                            except Exception as e:
-                                log.warning("Verify pass failed, using primary: %s", e)
-                                verify_text, verify_low = "", set()
-                        if full_text and full_text.strip():
-                            full_text = self._reconcile(
-                                full_text, primary_low, verify_text, verify_low)
-                    else:
-                        full_text, primary_low = self._transcribe_full_audio(wav_bytes)
-                    if full_text and full_text.strip():
-                        unioned = union_text(full_text.strip(), raw)
-                        if unioned != raw:
-                            final = unioned
-                            heavy_pass_changed = True
-                except Exception as e:
-                    log.warning("Full-audio transcription failed, using merged slices: %s", e)
-            else:
-                log.info("Short audio (%.1fs), using streaming transcript", audio_secs)
-
-        # Final safety net: collapse adjacent loops and drop trailing echoes
-        # anywhere in the assembled text before cleanup/typing.
-        final = strip_trailing_repeat(collapse_adjacent_repeats(final))
-
-        if not final.strip():
-            self._status.state = "idle"
-            self._overlay_state("idle")
-            self._notify_tray()
-            return
-        if final[-1] not in PUNCT:
-            final += "."
-
-        if pre_cleaned and not heavy_pass_changed:
-            # `quick` is already the correctly-cleaned version of this exact
-            # text (the heavy pass either didn't run or found nothing new) —
-            # reuse it instead of paying for (and risking phrasing drift from)
-            # a second LLM call on unchanged input.
+        if pre_cleaned:
+            # `quick` already is the full-pass transcript, cleaned.
             final = quick
         else:
-            correction_map = getattr(self._config, "correction_map", None) or {}
-            if correction_map:
-                for wrong, right in correction_map.items():
-                    final = final.replace(wrong, right)
+            # The slices are only a live preview: 3s windows give Whisper too
+            # little context, and stitching them drops/duplicates words at the
+            # seams. The single whole-recording pass replaces them outright.
+            final = (self._full_pass(wav_bytes) if wav_bytes else "") or raw
 
-            from src.merge import fuzzy_glossary_replace
-            glossary = getattr(self._config, "glossary", None) or []
-            final = fuzzy_glossary_replace(final, glossary)
+            # Final safety net: collapse adjacent loops and drop trailing
+            # echoes anywhere in the assembled text before cleanup/typing.
+            final = strip_trailing_repeat(collapse_adjacent_repeats(final))
+
+            if not final.strip():
+                self._status.state = "idle"
+                self._overlay_state("idle")
+                self._notify_tray()
+                return
+            if final[-1] not in PUNCT:
+                final += "."
+
+            final = self._apply_corrections(final)
 
             if self._cleaner:
                 self._status.state = "cleaning"
@@ -937,8 +876,11 @@ class DictationEngine:
             time.sleep(0.02)
 
     # ------------------------------------------------- full-audio transcription
-    def _context_prompt(self, tail: int = 15) -> str | None:
+    def _context_prompt(self, tail: int = 15, include_tail: bool = True) -> str | None:
         """Whisper context prompt = domain hint + glossary + last committed words.
+
+        `include_tail=False` leaves out the committed words (used by the
+        whole-recording pass, where they aren't "previous" text).
 
         Whisper uses this to bias recognition toward the right words (e.g.
         "login system" instead of "logging system", or a custom name like
@@ -959,10 +901,17 @@ class DictationEngine:
                 terms.append(term)
         if terms:
             parts.append(" ".join(terms))
-        if self._committed:
+        has_tail = include_tail and bool(self._committed)
+        if has_tail:
             parts.append(" ".join(self._committed[-tail:]))
+        if not parts:
+            return None
         prompt = " ".join(parts)
-        if len(prompt) > MAX_PROMPT_CHARS:
+        if len(prompt) > MAX_PROMPT_CHARS and not has_tail:
+            cut = prompt[:MAX_PROMPT_CHARS]
+            idx = cut.rfind(" ")
+            prompt = (cut[:idx] if idx > 0 else cut).strip()
+        elif len(prompt) > MAX_PROMPT_CHARS:
             # keep the hint + glossary bias, drop the committed-words tail;
             # if the glossary alone is still too long, trim whole terms.
             head = " ".join(parts[:-1]) if len(parts) > 1 else parts[0]
@@ -976,66 +925,104 @@ class DictationEngine:
                 prompt = head
         return prompt or None
 
+    def _full_pass(self, wav_bytes: bytes) -> str:
+        """Accurate transcript of the whole recording ("" on failure).
+
+        Runs the primary decode (plus the optional verify decode and its
+        reconciliation). Any failure returns "" so the caller falls back to
+        the streaming slice transcript.
+        """
+        self._status.state = "transcribing"
+        self._overlay_state("transcribing", self._status.committed_text)
+        self._notify_tray()
+        try:
+            if not self._verify_enabled():
+                full_text, _ = self._transcribe_full_audio(wav_bytes)
+                return full_text.strip()
+            # Primary and verify are independent decodes of the SAME audio,
+            # so run them concurrently. A primary failure is fatal to this
+            # pass (handled below); a verify failure alone must not discard a
+            # good primary result.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                primary_future = pool.submit(self._transcribe_full_audio, wav_bytes)
+                verify_future = pool.submit(self._transcribe_full_audio, wav_bytes,
+                                            model=self._verify_model())
+                full_text, primary_low = primary_future.result()
+                try:
+                    verify_text, verify_low = verify_future.result()
+                except Exception as e:
+                    log.warning("Verify pass failed, using primary: %s", e)
+                    verify_text, verify_low = "", set()
+            if not full_text.strip():
+                return ""
+            return self._reconcile(full_text, primary_low,
+                                   verify_text, verify_low).strip()
+        except Exception as e:
+            log.warning("Full-audio transcription failed, using merged slices: %s", e)
+            return ""
+
+    def _apply_corrections(self, text: str) -> str:
+        """User correction map + fuzzy glossary fix-ups, before cleanup."""
+        correction_map = getattr(self._config, "correction_map", None) or {}
+        for wrong, right in correction_map.items():
+            text = text.replace(wrong, right)
+        from src.merge import fuzzy_glossary_replace
+        glossary = getattr(self._config, "glossary", None) or []
+        return fuzzy_glossary_replace(text, glossary)
+
+    def _final_model(self) -> str | None:
+        return getattr(self._config, "final_model", None) or None
+
     def _transcribe_full_audio(self, wav_bytes: bytes, model: str | None = None,
-                               temperature: float | None = None
                                ) -> tuple[str, set[str]]:
-        """Chunked transcription of the whole recording.
+        """One-call transcription of the whole recording.
 
-        The full utterance is split into overlapping FINAL_CHUNK_SECS windows
-        and each is transcribed separately; the overlap-diff merge then stitches
-        them into one transcript. Long single-pass Whisper calls are the classic
-        cause of dropped sentences, so we never rely on one call over long audio.
+        Whisper is far more accurate with the whole utterance than with short
+        stitched windows (no context loss or seam errors), and recordings are
+        capped at MAX_RECORD_SECS, well within the API's file limits. Leading
+        and trailing silence is trimmed first, since Whisper tends to
+        hallucinate filler ("Thank you.") on silent stretches. Decoded at
+        temperature 0 with a hint+glossary prompt only: feeding the streaming
+        transcript as "previous text" would show Whisper the END of the
+        utterance before its start, a known cause of echoed/invented words.
 
-        Returns (text, low_conf_words). `model`/`temperature` override the
-        decode (used by the verify pass). `low_conf_words` holds normalized
-        words from segments whose average log probability suggests an uncertain
+        Returns (text, low_conf_words). `model` overrides the decode model
+        (used by the verify pass); `low_conf_words` holds normalized words
+        from segments whose average log probability suggests an uncertain
         decode — useful for adjudicating disagreements.
         """
         pcm, rate = pcm_from_wav(wav_bytes)
+        pcm = trim_silence(pcm, rate)
         if len(pcm) == 0:
             return "", set()
-        chunk_len = int(rate * FINAL_CHUNK_SECS)
-        overlap = int(rate * FINAL_CHUNK_OVERLAP_SECS)
-        min_len = int(rate * 1.0)
-        committed: list[str] = []
+        kwargs: dict = {
+            "language": self._config.language,
+            "prompt": self._context_prompt(include_tail=False),
+        }
+        if not self._local:
+            kwargs["verbose"] = True
+            kwargs["temperature"] = 0.0
+            final_model = model or self._final_model()
+            if final_model:
+                kwargs["model"] = final_model
+        result = self._transcriber.transcribe_bytes(_to_wav(pcm, rate), **kwargs)
         low_conf: set[str] = set()
-        i = 0
-        while i < len(pcm):
-            window = pcm[i:i + chunk_len]
-            if len(window) >= min_len:
-                kwargs: dict = {
-                    "language": self._config.language,
-                    "prompt": self._context_prompt(tail=24),
-                }
-                if not self._local:
-                    kwargs["verbose"] = True
-                    if model is not None:
-                        kwargs["model"] = model
-                    if temperature is not None:
-                        kwargs["temperature"] = temperature
-                result = self._transcriber.transcribe_bytes(_to_wav(window, rate),
-                                                             **kwargs)
-                if isinstance(result, str):
-                    text = result
-                else:  # TranscriptResult with confidence metadata
-                    text = result.text
-                    low_conf.update(_low_conf_words(result))
-                # A chunk may itself loop or echo back prompt words; strip both
-                # before stitching, so they can't leak into mid-text when the
-                # chunk is merged with the next one.
-                text = strip_trailing_repeat(collapse_adjacent_repeats(text))
-                if text.strip() and is_hallucinated_filler(text):
-                    log.info("Chunk looks like a Whisper hallucination "
-                             "filler; ignoring: %r", text)
-                    text = ""
-                committed, _ = merge_segments(committed, text, max_overlap=24)
-            i += chunk_len - overlap
-        return " ".join(committed), low_conf
+        if isinstance(result, str):
+            text = result
+        else:  # TranscriptResult with confidence metadata
+            text = result.text
+            low_conf.update(_low_conf_words(result))
+        text = strip_trailing_repeat(collapse_adjacent_repeats(text))
+        if text.strip() and is_hallucinated_filler(text):
+            log.info("Full pass looks like a Whisper hallucination filler; "
+                     "ignoring: %r", text)
+            text = ""
+        return text.strip(), low_conf
 
     # -------------------------------------------------- verify / reconciliation
     def _verify_enabled(self) -> bool:
         """Verify pass needs a second decode + an LLM to adjudicate disputes."""
-        return (bool(getattr(self._config, "verify", True))
+        return (bool(getattr(self._config, "verify", False))
                 and not self._local
                 and self._cleaner is not None)
 
@@ -1043,7 +1030,9 @@ class DictationEngine:
         verify_model = getattr(self._config, "verify_model", None)
         if verify_model:
             return verify_model
-        primary = getattr(self._config, "whisper_model", "") or ""
+        # The "other" large model relative to whatever the final pass uses.
+        primary = (self._final_model()
+                   or getattr(self._config, "whisper_model", "") or "")
         if primary == "whisper-large-v3-turbo":
             return "whisper-large-v3"
         return "whisper-large-v3-turbo"
@@ -1187,6 +1176,26 @@ def _is_silent(data: np.ndarray, rate: int) -> bool:
     rms = np.sqrt(np.mean(np.square(data.astype(np.float32) / 32768.0)))
     db = 20.0 * np.log10(max(rms, 1e-8))
     return db < -40.0
+
+
+def trim_silence(pcm: np.ndarray, rate: int, frame_secs: float = 0.03,
+                 pad_secs: float = TRIM_PAD_SECS) -> np.ndarray:
+    """Drop leading/trailing silence (same -40 dB gate as capture), keeping
+    `pad_secs` around the speech so word edges aren't clipped. Audio with no
+    frame above the gate is returned unchanged rather than emptied.
+    """
+    frame = max(1, int(rate * frame_secs))
+    n = len(pcm) // frame
+    if n == 0:
+        return pcm
+    voiced = [i for i in range(n)
+              if not _is_silent(pcm[i * frame:(i + 1) * frame], rate)]
+    if not voiced:
+        return pcm
+    pad = int(rate * pad_secs)
+    start = max(0, voiced[0] * frame - pad)
+    end = min(len(pcm), (voiced[-1] + 1) * frame + pad)
+    return pcm[start:end]
 
 
 def _to_wav(audio: np.ndarray, rate: int) -> bytes:

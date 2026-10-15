@@ -37,7 +37,7 @@ def test_glossary_added_to_correcting_prompt():
     client = CleanupClient(api_key="test-key", glossary=["Razorpay", "Lorem Ipsum"])
     prompt = client.system_prompt
     assert prompt.startswith(CORRECTING_PROMPT)
-    assert "MUST appear in your output" in prompt
+    assert "Glossary of the user's names and terms" in prompt
     assert "Razorpay, Lorem Ipsum" in prompt
 
 
@@ -46,7 +46,7 @@ def test_glossary_added_to_conservative_prompt():
                            glossary=["Razorpay"])
     prompt = client.system_prompt
     assert prompt.startswith(CONSERVATIVE_PROMPT)
-    assert "MUST appear in your output" in prompt
+    assert "Glossary of the user's names and terms" in prompt
     assert "Razorpay" in prompt
 
 
@@ -231,5 +231,5 @@ def test_reconcile_prompt_includes_glossary(monkeypatch):
 
     monkeypatch.setattr(client._client.chat.completions, "create", capture)
     client.reconcile([_dispute(0, "resopay", "razorpay")])
-    assert "MUST appear in your output" in sent["system"]
+    assert "Glossary of the user's names and terms" in sent["system"]
     assert "Razorpay" in sent["system"]

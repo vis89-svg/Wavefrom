@@ -27,7 +27,9 @@ LOGS_DIR = BASE_DIR / "logs"
 ENV_PATH = BASE_DIR / ".env"
 
 DEFAULT_WHISPER_MODEL = "whisper-large-v3-turbo"
-DEFAULT_CLEANUP_MODEL = "openai/gpt-oss-20b"
+DEFAULT_CLEANUP_MODEL = "openai/gpt-oss-120b"
+DEFAULT_FINAL_MODEL = "whisper-large-v3"  # whole-recording pass on release
+SETTINGS_VERSION = 4
 DEFAULT_SAMPLE_RATE = 16000
 
 KEYRING_SERVICE = "Waveform"
@@ -49,7 +51,8 @@ class Settings:
                         # explicit mode is passed (e.g. dictate_bytes()/tests);
                         # the live app now always passes an explicit mode.
     live_hotkey: str = "ctrl+alt+d"  # tap-style live-typing hotkey
-    whisper_model: str = DEFAULT_WHISPER_MODEL
+    whisper_model: str = DEFAULT_WHISPER_MODEL  # live-preview slices
+    final_model: str | None = DEFAULT_FINAL_MODEL  # None = use whisper_model
     cleanup_model: str | None = DEFAULT_CLEANUP_MODEL
     cleanup_mode: str = "correcting"  # correcting | conservative | polish
     polish_model: str = "openai/gpt-oss-120b"  # stronger model for the Polish button
@@ -64,12 +67,12 @@ class Settings:
     domain_hint: str = ""     # optional Whisper context prompt (e.g. "software development")
     glossary: list[str] = field(default_factory=list)  # names/terms to keep verbatim
     correction_map: dict[str, str] = field(default_factory=dict)  # wrong -> correct mappings
-    verify: bool = True       # cross-check final pass with a second model
+    verify: bool = False      # cross-check final pass with a second model
     verify_model: str | None = None  # None = pick the other large Whisper model
     slice_secs: float = 3.0   # capture window; lower = snappier (more API calls)
     overlay: bool = True      # floating live indicator (waveform + text preview)
     app_tone: bool = True     # pass the foreground window title to cleanup
-    version: int = 3
+    version: int = SETTINGS_VERSION
     groq_api_key: str = ""
 
     @property
@@ -95,6 +98,19 @@ def load_settings() -> Settings:
         s.mode = "hold"
     if s.cleanup_mode not in ("correcting", "conservative", "polish"):
         s.cleanup_mode = "correcting"
+    if data and int(data.get("version", 0) or 0) < 4:
+        # v4 accuracy defaults: settings.json stores every field, so old
+        # defaults never change on their own. Only values still at the old
+        # default are moved; anything the user picked is kept.
+        if s.cleanup_model in ("openai/gpt-oss-20b", "llama-3.3-70b-versatile"):
+            s.cleanup_model = DEFAULT_CLEANUP_MODEL
+        if data.get("verify", True) is True:
+            s.verify = False
+        s.version = SETTINGS_VERSION
+        try:
+            save_settings(s)
+        except Exception as e:
+            log.debug("settings migration save failed: %s", e)
     return s
 
 

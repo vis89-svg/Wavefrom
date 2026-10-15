@@ -17,7 +17,7 @@ def _norm(w: str) -> str:
     return "".join(c for c in w.casefold() if c.isalnum())
 
 
-def fuzzy_glossary_replace(text: str, glossary: list[str], threshold: float = 0.75) -> str:
+def fuzzy_glossary_replace(text: str, glossary: list[str], threshold: float = 0.85) -> str:
     """Replace words that are close-but-wrong spellings of glossary terms.
 
     Handles both single-word and multi-word glossary terms (e.g. "hippo
@@ -65,6 +65,9 @@ def fuzzy_glossary_replace(text: str, glossary: list[str], threshold: float = 0.
                 continue
             t_norm = _norm(term)
             if t_norm == normed:
+                # already an exact glossary term: never swap it for a
+                # different term that happened to score earlier
+                best_term = None
                 break
             ratio = difflib.SequenceMatcher(None, normed, t_norm).ratio()
             if ratio > best_ratio:

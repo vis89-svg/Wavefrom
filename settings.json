@@ -2,7 +2,8 @@
   "hotkey": "ctrl+win",
   "mode": "tap",
   "whisper_model": "whisper-large-v3-turbo",
-  "cleanup_model": "openai/gpt-oss-20b",
+  "final_model": "whisper-large-v3",
+  "cleanup_model": "openai/gpt-oss-120b",
   "cleanup_mode": "correcting",
   "polish_model": "openai/gpt-oss-120b",
   "language": "en",
@@ -16,11 +17,11 @@
   "domain_hint": "",
   "glossary": [],
   "correction_map": {},
-  "verify": true,
+  "verify": false,
   "verify_model": null,
   "slice_secs": 3.0,
   "overlay": true,
   "app_tone": true,
-  "version": 3,
+  "version": 4,
   "groq_api_key": ""
 }

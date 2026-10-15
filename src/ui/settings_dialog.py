@@ -6,6 +6,7 @@ import tkinter as tk
 from dataclasses import asdict
 from tkinter import messagebox, ttk
 
+from src.config import DEFAULT_CLEANUP_MODEL
 from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
@@ -184,7 +185,7 @@ def show_settings_dialog(settings, on_save=None) -> bool:
             "hotkey": hotkey,
             "live_hotkey": live_hotkey,
             "language": lang_var.get().strip() or None,
-            "cleanup_model": "openai/gpt-oss-20b"
+            "cleanup_model": DEFAULT_CLEANUP_MODEL
             if cleanup_mode_var.get() != "off" else None,
             "cleanup_mode": cleanup_mode_var.get()
             if cleanup_mode_var.get() != "off" else "correcting",

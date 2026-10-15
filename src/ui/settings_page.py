@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.config import DEFAULT_CLEANUP_MODEL
 from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
@@ -297,7 +298,7 @@ class SettingsPage(QWidget):
             "hotkey": hotkey,
             "live_hotkey": live_hotkey,
             "language": self._lang_edit.text().strip() or None,
-            "cleanup_model": ("openai/gpt-oss-20b"
+            "cleanup_model": (DEFAULT_CLEANUP_MODEL
                               if cleanup_mode != "off" else None),
             "cleanup_mode": (cleanup_mode
                              if cleanup_mode != "off" else "correcting"),

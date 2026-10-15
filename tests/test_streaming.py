@@ -12,6 +12,9 @@ from src.streaming import (DictationEngine, _is_silent, _to_wav, pcm_from_wav,
                            slice_audio)
 
 
+PRIMARY_FINAL_MODEL = "whisper-large-v3"  # Config().final_model
+
+
 class FakeTranscriber:
     def __init__(self, map_by_slice):
         self._map = map_by_slice
@@ -27,11 +30,13 @@ class FakeTranscriber:
         # (primary/slice calls never do) — routing them to the last map
         # entry, rather than "whichever call happens to arrive first gets
         # the next index", keeps which canned response is primary vs.
-        # verify deterministic regardless of thread scheduling.
+        # verify deterministic regardless of thread scheduling. The primary
+        # full pass also passes `model=` (the final_model), so only a model
+        # other than that one counts as a verify call.
         with self._lock:
             self.calls.append(len(audio_bytes))
             self.kwargs.append(kwargs)
-            if "model" in kwargs:
+            if kwargs.get("model") not in (None, PRIMARY_FINAL_MODEL):
                 return self._map[-1]
             idx = self._next_idx
             self._next_idx += 1
@@ -176,7 +181,7 @@ def test_finalize_cleanup_replaces_text():
     assert injector.parts == ["hello world, everyone here."]
 
 
-def test_finalize_background_correction_after_quick_type():
+def test_finalize_full_pass_runs_before_pre_type():
     # Long recording + cleaner: the streaming slices miss "this is streaming"
     # (only the full-audio pass hears it). The quick-cleaned text is typed
     # immediately (pre-type), and once the heavy pass genuinely recovers new
@@ -201,10 +206,10 @@ def test_finalize_background_correction_after_quick_type():
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
-    # The first thing typed is the quick-cleaned (but incomplete) text.
-    assert injector.parts[0] == "hello world farewell."
-    # A real correction follows since the heavy pass found genuinely new content.
-    assert injector.deleted > 0
+    # The full-audio pass runs BEFORE the pre-type, so the first (and only)
+    # text typed already contains what the slices missed: no correction.
+    assert injector.parts == ["hello world this is streaming farewell."]
+    assert injector.deleted == 0
     assert engine.status.committed_text == "hello world this is streaming farewell."
 
 
@@ -271,23 +276,48 @@ def test_chunked_final_union_recovers_dropped_sentence():
     assert engine.status.committed_text == "hello world this is a test goodbye world."
 
 
-def test_full_audio_chunked_into_overlapping_windows():
+def test_full_audio_is_one_call_with_final_model():
     rate = 16000
-    transcriber = FakeTranscriber([
-        "hello world",                  # chunk 1 [0s,20s)
-        "world this is a test",         # chunk 2 [18s,38s)
-        "test goodbye",                 # chunk 3 [36s,42s)
-    ])
+    transcriber = FakeTranscriber(["hello world this is a test goodbye"])
     engine = make_engine(transcriber, None)
     engine.start()
     engine._full_audio = _to_wav(np.zeros(int(rate * 42), dtype=np.int16), rate)
     engine._slice_q.put(None)
     engine._worker.join(timeout=5)
 
-    # 42s -> 3 chunks (FINAL_CHUNK_SECS=20, overlap 2s), overlap-diff stitched
-    # with no duplication/loss
-    assert len(transcriber.calls) == 3
+    # 42s -> a single whole-recording call: no seams to stitch
+    assert len(transcriber.calls) == 1
+    assert transcriber.kwargs[0]["model"] == "whisper-large-v3"
+    assert transcriber.kwargs[0]["temperature"] == 0.0
     assert engine.status.committed_text == "hello world this is a test goodbye."
+
+
+def test_short_recording_still_gets_full_pass():
+    # Short dictations used to keep the stitched slice text; the full pass
+    # must now replace it regardless of length.
+    transcriber = FakeTranscriber(["hello word", "hello world"])
+    engine = make_engine(transcriber, None)
+    engine.start()
+    engine._full_audio = _to_wav(np.zeros(16000 * 3, dtype=np.int16), 16000)
+    engine._slice_q.put(_to_wav(np.zeros(0, dtype=np.int16), 16000))
+    engine._slice_q.put(None)
+    engine._worker.join(timeout=5)
+
+    assert len(transcriber.calls) == 2
+    assert engine.status.committed_text == "hello world."
+
+
+def test_trim_silence_keeps_speech_with_padding():
+    rate = 16000
+    tone = (np.sin(np.arange(rate) / 8) * 8000).astype(np.int16)
+    pcm = np.concatenate([np.zeros(rate * 2, dtype=np.int16), tone,
+                          np.zeros(rate * 3, dtype=np.int16)])
+    out = streaming.trim_silence(pcm, rate)
+    pad = int(rate * streaming.TRIM_PAD_SECS)
+    assert abs(len(out) - (rate + 2 * pad)) <= int(rate * 0.03) * 2
+    # all-silent audio is left alone rather than emptied
+    silent = np.zeros(rate, dtype=np.int16)
+    assert len(streaming.trim_silence(silent, rate)) == rate
 
 
 class _FakeStream:
@@ -424,10 +454,9 @@ def test_domain_hint_biases_slice_and_full_audio_prompts():
 
     # slice prompt: hint only (nothing committed yet)
     assert transcriber.kwargs[0]["prompt"] == "software development"
-    # full-audio chunk prompt: hint + last committed words
-    chunk_prompt = transcriber.kwargs[1]["prompt"]
-    assert chunk_prompt.startswith("software development")
-    assert "hello world" in chunk_prompt
+    # full-audio prompt: hint only. The committed words are the END of the
+    # utterance, not text preceding it, so they must not bias the full pass.
+    assert transcriber.kwargs[1]["prompt"] == "software development"
     assert engine.status.state == "idle"
 
 
@@ -503,6 +532,7 @@ def test_verify_pass_reconciles_substitution():
         "hello the whole app is gone",          # verify chunk (alt model)
     ])
     engine = make_engine(transcriber, None)
+    engine._config.verify = True
     engine._cleaner = FakeCleaner(choices={0: "B"})
 
     engine.start()
@@ -516,9 +546,9 @@ def test_verify_pass_reconciles_substitution():
     # model/temperature rather than assuming a fixed arrival index.
     assert len(transcriber.calls) == 3
     verify_calls = [kw for kw in transcriber.kwargs
-                    if kw.get("model") == "whisper-large-v3"]
+                    if kw.get("model") == "whisper-large-v3-turbo"]
     assert len(verify_calls) == 1
-    assert verify_calls[0]["temperature"] == 0.4
+    assert verify_calls[0]["temperature"] == 0.0
     assert len(engine._last_disputes) == 1
     # reconciled: verify wording chosen, hallucinated "four web apps" gone
     assert "whole app is gone" in engine.status.committed_text
@@ -553,9 +583,10 @@ def test_verify_reconcile_failure_keeps_primary():
         "hello the whole app is gone",
     ])
     engine = make_engine(transcriber, None)
+    engine._config.verify = True
 
     class BoomCleaner:
-        def clean(self, raw):
+        def clean(self, raw, app_hint=None):
             return raw
 
         def reconcile(self, disputes):
@@ -795,13 +826,13 @@ def test_finalize_early_types_raw_then_period_diff():
     # Hold-mode deferral leaves _typed_text empty; finalize must type the raw
     # text immediately (verbatim, no period) and let the final diff add the
     # period instead of waiting for the expensive pass.
-    transcriber = FakeTranscriber(["irrelevant"])
+    transcriber = FakeTranscriber(["hello world"])  # full pass agrees
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
     engine._committed = ["hello", "world"]
     engine._typed_text = ""
 
-    wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)  # 1s → short path
+    wav = _to_wav(np.zeros(16000, dtype=np.int16), 16000)
     engine._finalize(wav)
 
     assert injector.parts == ["hello world", "."]
@@ -864,7 +895,8 @@ def test_hold_mode_post_release_slice_is_deferred_not_live_typed():
     # typed and the screen did not match the corrected text. Hold mode must
     # defer every slice — even post-release — and let the finalize early-type
     # type the full text, bounded by the ledger.
-    transcriber = FakeTranscriber(["hello world this is", "this is a test"])
+    transcriber = FakeTranscriber(["hello world this is", "this is a test",
+                                   "hello world this is a test"])  # full pass
     injector = FakeInjector()
     engine = make_engine(transcriber, injector)
     engine._config.mode = "hold"

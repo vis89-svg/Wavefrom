@@ -65,10 +65,36 @@ def test_load_config_reads_glossary_env():
     assert cfg.glossary == ["Razorpay", "Lorem Ipsum", "stripe"]
 
 
-def test_verify_defaults_on():
+def test_verify_defaults_off():
     cfg = Config()
-    assert cfg.verify is True
+    assert cfg.verify is False
     assert cfg.verify_model is None
+
+
+def test_v3_settings_migrate_to_accuracy_defaults(tmp_path, monkeypatch):
+    import json
+    import src.config as config
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"version": 3, "verify": True,
+                                "cleanup_model": "openai/gpt-oss-20b",
+                                "hotkey": "ctrl+space"}))
+    monkeypatch.setattr(config, "SETTINGS_FILE", path)
+    s = config.load_settings()
+    assert s.cleanup_model == config.DEFAULT_CLEANUP_MODEL
+    assert s.verify is False
+    assert s.final_model == "whisper-large-v3"
+    assert s.hotkey == "ctrl+space"  # user choices kept
+    assert json.loads(path.read_text())["version"] == config.SETTINGS_VERSION
+
+
+def test_v3_migration_keeps_user_picked_cleanup_model(tmp_path, monkeypatch):
+    import json
+    import src.config as config
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"version": 3,
+                                "cleanup_model": "openai/gpt-oss-120b"}))
+    monkeypatch.setattr(config, "SETTINGS_FILE", path)
+    assert config.load_settings().cleanup_model == "openai/gpt-oss-120b"
 
 
 def test_load_config_reads_verify_env():
@@ -91,7 +117,7 @@ def test_load_config_verify_model_none():
         cfg = load_config()
     finally:
         os.environ.pop("VERIFY_MODEL", None)
-    assert cfg.verify is True
+    assert cfg.verify is False
     assert cfg.verify_model is None
 
 
