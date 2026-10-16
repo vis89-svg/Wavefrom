@@ -30,13 +30,13 @@ log = logging.getLogger(__name__)
 
 _WINDOW_STYLE = """
 QMainWindow, QWidget#login {
-    background-color: #262624;
+    background-color: #000000;
 }
 QLabel {
     color: #ece9e1;
 }
 QLineEdit {
-    background: #30302e; color: #ece9e1; border: 1px solid #3d3d3a;
+    background: #121212; color: #ece9e1; border: 1px solid #262626;
     border-radius: 6px; padding: 8px 12px; font: 13px 'Segoe UI';
 }
 QLineEdit:focus {
@@ -53,10 +53,10 @@ QPushButton:pressed {
     background: #b5663f;
 }
 QPushButton#cancel {
-    background: #3d3d3a;
+    background: #262626;
 }
 QPushButton#cancel:hover {
-    background: #45443f;
+    background: #1c1c1c;
 }
 """
 

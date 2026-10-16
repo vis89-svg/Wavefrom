@@ -1,7 +1,7 @@
 """Persistent dock overlay: idle dots -> slim pill -> result card (PySide6).
 
 A single always-on-top window anchored bottom-center, just above the taskbar:
-  1. **Idle** -- three small pen-point dots (black, muted brown ring), always
+  1. **Idle** -- three small pen-point dots (black, ash grey ring), always
      visible and click-through.
   2. **Pill** -- when a dictation starts the outer dots slide into the middle
      one, which stretches into a slim pill: status dot, thin live waveform
@@ -25,7 +25,8 @@ import time
 from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QPointF,
                             QPropertyAnimation, QRect, QRectF, Qt, QTimer,
                             QVariantAnimation, Signal)
-from PySide6.QtGui import QBrush, QColor, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import (QBrush, QColor, QCursor, QFontMetrics, QPainter,
+                           QPainterPath, QPen)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -88,8 +89,20 @@ _CARD_GAP = 4             # space between the card's shadow box and the pill
 _CARD_RADIUS = 14.0
 _CARD_TEXT_MAX_H = 170    # ~8 lines of text before the card scrolls
 
+# Hover mic: a droplet that pulls out of the right-hand dot.
+_MIC_D = 22               # mic button diameter
+_MIC_GAP = 8              # space between the right dot and the settled mic
+_MIC_OUT_MS = 460
+_MIC_IN_MS = 300
+_NECK_SNAP = 0.55         # mic progress at which the liquid neck snaps
+_HOVER_POLL_MS = 50       # idle dots are click-through, so poll the cursor
+_HOVER_PAD = 8            # how close the cursor must get to wake the mic
+_MIC_ICON = QColor("#8a8a8a")
+_MIC_ICON_HOT = QColor("#d6d6d6")
+_MIC_FILL_HOT = QColor(26, 26, 26)
+
 _DOT_FILL = QColor(0, 0, 0)
-_DOT_RING = QColor("#7A5230")
+_DOT_RING = QColor("#8A8A8A")  # ash grey
 _PILL_FILL = QColor(17, 18, 22, 245)
 _PILL_BORDER = QColor(255, 255, 255, 40)
 _CARD_FILL = QColor(28, 30, 36, 250)
@@ -122,6 +135,59 @@ def morph_shape(t: float, dot: float, box_w: float, box_h: float):
     h = _lerp(dot, max(box_h, dot), b)
     radius = min(w, h) / 2  # stays fully rounded: dot -> capsule
     return "box", w, h, radius
+
+
+def _ease_out_back(t: float, overshoot: float = 1.0) -> float:
+    """Ease out with a small overshoot, so the mic 'lands' like a drop."""
+    t = max(0.0, min(1.0, t))
+    c1 = 1.70158 * overshoot
+    c3 = c1 + 1
+    return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2
+
+
+def mic_drop(m: float, dot: float, mic_d: float = _MIC_D):
+    """Mic droplet at progress `m` (0 = inside the right dot, 1 = settled).
+
+    Returns (dx, r, neck): the droplet's centre offset from the right dot's
+    centre, its radius, and the half-width of the liquid neck joining them
+    (0 once it has snapped).
+    """
+    travel = dot / 2 + _MIC_GAP + mic_d / 2
+    dx = travel * _ease_out_back(m, 0.6)
+    r = _lerp(dot / 2, mic_d / 2, _ease(min(1.0, m / 0.8)))
+    neck = 0.0 if m >= _NECK_SNAP else dot * 0.4 * (1 - m / _NECK_SNAP)
+    return dx, r, neck
+
+
+def idle_half_width(dot: float, mic_d: float = _MIC_D) -> float:
+    """Half the idle canvas width: dots centred, room for the mic on the
+    right (mirrored on the left so the dots stay centred on screen)."""
+    offset = dot * (1 + _DOT_GAP_RATIO)
+    return offset + dot / 2 + _MIC_GAP + mic_d + 4  # +4: landing overshoot
+
+
+def draw_mic_icon(p: QPainter, c: QPointF, r: float, color: QColor) -> None:
+    """Standard microphone line icon inside a circle of radius `r` at `c`:
+    capsule head, U-shaped holder, stem and base."""
+    s = r / 11.0
+    pen = QPen(color, max(1.0, 1.4 * s))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.save()
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    head_cy = c.y() - 1.8 * s
+    # Capsule (mic head)
+    p.drawRoundedRect(QRectF(c.x() - 2.6 * s, head_cy - 4.4 * s, 5.2 * s, 8.8 * s),
+                      2.6 * s, 2.6 * s)
+    # U-shaped holder around the lower half of the head
+    u = QRectF(c.x() - 4.6 * s, head_cy - 3.2 * s, 9.2 * s, 9.2 * s)
+    p.drawArc(u, 180 * 16, 180 * 16)
+    # Stem and base
+    stem_top = u.bottom()
+    p.drawLine(QPointF(c.x(), stem_top), QPointF(c.x(), stem_top + 2.2 * s))
+    p.drawLine(QPointF(c.x() - 2.6 * s, stem_top + 2.2 * s),
+               QPointF(c.x() + 2.6 * s, stem_top + 2.2 * s))
+    p.restore()
 
 
 def format_elapsed(ms: int) -> str:
@@ -438,6 +504,13 @@ class OverlayWindow(QWidget):
         self._send_callback = None
         self._clipboard_callback = None
         self._stop_callback = None
+        self._mic_callback = None
+
+        # Hover mic: progress (0 = hidden in the right dot, 1 = settled).
+        self._mic_t = 0.0
+        self._mic_open = False   # cursor near the dots -> mic out
+        self._mic_hot = False    # cursor over the mic button itself
+        self._mic_anim: QVariantAnimation | None = None
 
         # Morph state: t (0 = dots, 1 = pill).
         self._dot = _DOT_PX
@@ -459,6 +532,10 @@ class OverlayWindow(QWidget):
         self._dismiss_timer = QTimer(self)
         self._dismiss_timer.setSingleShot(True)
         self._dismiss_timer.timeout.connect(self._on_auto_dismiss)
+
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setInterval(_HOVER_POLL_MS)
+        self._hover_timer.timeout.connect(self._poll_hover)
 
     # ── UI construction ──────────────────────────────────────────────────
     def _build_ui(self) -> None:
@@ -515,6 +592,10 @@ class OverlayWindow(QWidget):
     def set_stop_callback(self, callback) -> None:
         self._stop_callback = callback
 
+    def set_mic_callback(self, callback) -> None:
+        """Called (on the GUI thread) when the hover mic is clicked."""
+        self._mic_callback = callback
+
     def set_hotkeys(self, hold: str, live: str) -> None:
         self._hold_hotkey = hold
         self._live_hotkey = live
@@ -530,6 +611,7 @@ class OverlayWindow(QWidget):
         self.raise_()
         self._force_topmost()
         self._make_click_through()
+        self._hover_timer.start()
 
     def stop(self) -> None:
         """Collapse back to the idle dots."""
@@ -553,6 +635,7 @@ class OverlayWindow(QWidget):
             self._visible = True
             self.show()
 
+        self._hide_mic_now()
         self._state = state
         if state == "done":
             self._show_panel(text)
@@ -723,12 +806,97 @@ class OverlayWindow(QWidget):
         self._t = self._anim_to
         self._apply_geometry()
         self._pill.setVisible(self._t >= 1.0)
+        if self._t == 0.0 and self._state == "idle" and self._visible:
+            self._hover_timer.start()  # back to resting dots: mic available
         self.raise_()
         self._force_topmost()
+
+    # ── Hover mic ───────────────────────────────────────────────────────
+    def _at_rest(self) -> bool:
+        return self._state == "idle" and self._t == 0.0 and self._anim is None
+
+    def _mic_center(self) -> QPointF:
+        offset = self._dot * (1 + _DOT_GAP_RATIO)
+        dx, _, _ = mic_drop(self._mic_t, self._dot)
+        return QPointF(self.width() / 2 + offset + dx, self.height() / 2)
+
+    def _poll_hover(self) -> None:
+        if not self._at_rest():
+            return
+        pos = QCursor.pos()
+        g = self.geometry()
+        pad = _HOVER_PAD * (2 if self._mic_open else 1)  # hysteresis
+        near = g.adjusted(-pad, -pad, pad, pad).contains(pos)
+        if near != self._mic_open:
+            self._mic_open = near
+            # Only while the mic is out does this small area take clicks.
+            self._set_interactive(near)
+            self._animate_mic(1.0 if near else 0.0)
+        hot = False
+        if self._mic_open and self._mic_t > 0.9:
+            c = self._mic_center()
+            local = pos - g.topLeft()
+            hot = math.hypot(local.x() - c.x(), local.y() - c.y()) <= _MIC_D / 2 + 2
+        if hot != self._mic_hot:
+            self._mic_hot = hot
+            self.setCursor(Qt.CursorShape.PointingHandCursor if hot
+                           else Qt.CursorShape.ArrowCursor)
+            self.setToolTip(f"Start live typing ({self._live_hotkey})" if hot else "")
+            self.update()
+
+    def _animate_mic(self, target: float) -> None:
+        if self._mic_anim is not None:
+            self._mic_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setStartValue(self._mic_t)
+        anim.setEndValue(target)
+        anim.setDuration(_MIC_OUT_MS if target > self._mic_t else _MIC_IN_MS)
+        anim.setEasingCurve(QEasingCurve.Type.Linear)  # shaping is in mic_drop
+        anim.valueChanged.connect(self._on_mic_frame)
+        self._mic_anim = anim
+        anim.start()
+
+    def _on_mic_frame(self, v) -> None:
+        self._mic_t = float(v)
+        self.update()
+
+    def _hide_mic_now(self) -> None:
+        """A dictation is starting: tuck the mic away without animating."""
+        self._hover_timer.stop()
+        if self._mic_anim is not None:
+            self._mic_anim.stop()
+            self._mic_anim = None
+        self._mic_t = 0.0
+        self._mic_open = False
+        if self._mic_hot:
+            self._mic_hot = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.setToolTip("")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if (self._at_rest() and self._mic_open and self._mic_t > 0.9
+                and event.button() == Qt.MouseButton.LeftButton):
+            c = self._mic_center()
+            pos = event.position()
+            if math.hypot(pos.x() - c.x(), pos.y() - c.y()) <= _MIC_D / 2 + 2:
+                self._on_mic()
+                return
+        super().mousePressEvent(event)
+
+    def _on_mic(self) -> None:
+        self._hide_mic_now()
+        self._make_click_through()
+        self.update()
+        if self._mic_callback is not None:
+            # Next event-loop turn, so this click handler returns first.
+            QTimer.singleShot(0, self._mic_callback)
 
     # ── Geometry + painting ─────────────────────────────────────────────
     def _apply_geometry(self) -> None:
         """Resize/move the window to the pill (+ card), bottom-center."""
+        if self._t == 0.0 and not self._card_on:
+            self._apply_idle_geometry()
+            return
         _, w, h, _ = morph_shape(self._t, self._dot, _PILL_WIDTH, _PILL_HEIGHT)
         pill_w = int(math.ceil(w)) + 2 * _MARGIN
         pill_h = int(math.ceil(h)) + 2 * _MARGIN
@@ -754,9 +922,71 @@ class OverlayWindow(QWidget):
                                int(w), int(h))
         self.update()
 
+    def _apply_idle_geometry(self) -> None:
+        """Resting dots: a canvas centred on the dots, wide enough for the
+        hover mic on the right (mirrored left so the dots stay centred)."""
+        half = idle_half_width(self._dot)
+        win_w = int(math.ceil(2 * half)) + 2 * _MARGIN
+        win_h = _MIC_D + 2 * _MARGIN
+        screen = self.screen() or QApplication.primaryScreen()
+        rect = screen.availableGeometry()
+        cx = rect.left() + rect.width() / 2
+        # Same dot centre line as the morph frames use, so nothing jumps.
+        dot_cy = rect.bottom() + 1 - _TASKBAR_GAP - self._dot / 2
+        x = int(round(cx - win_w / 2))
+        y = int(round(dot_cy - win_h / 2))
+        self.setGeometry(QRect(x, max(rect.top(), y), win_w, win_h))
+        self.update()
+
+    def _paint_idle(self, p: QPainter) -> None:
+        """Three dots; the right one can grow a droplet that becomes the mic."""
+        cx, cy = self.width() / 2, self.height() / 2
+        offset = self._dot * (1 + _DOT_GAP_RATIO)
+        r = (self._dot - _DOT_BORDER) / 2
+        p.setPen(QPen(_DOT_RING, _DOT_BORDER))
+        p.setBrush(QBrush(_DOT_FILL))
+        for dx in (-offset, 0.0):
+            p.drawEllipse(QPointF(cx + dx, cy), r, r)
+
+        right = QPointF(cx + offset, cy)
+        if self._mic_t <= 0.0:
+            p.drawEllipse(right, r, r)
+            return
+        dx, mr, neck = mic_drop(self._mic_t, self._dot)
+        drop = QPointF(right.x() + dx, cy)
+        shape = QPainterPath()
+        shape.addEllipse(right, r, r)
+        if neck > 0.0:
+            # Liquid bridge: pinched in the middle, thinning until it snaps.
+            mid = (right.x() + drop.x()) / 2
+            bridge = QPainterPath()
+            bridge.moveTo(right.x(), cy - r)
+            bridge.cubicTo(mid, cy - neck, mid, cy - neck, drop.x(), cy - mr)
+            bridge.lineTo(drop.x(), cy + mr)
+            bridge.cubicTo(mid, cy + neck, mid, cy + neck, right.x(), cy + r)
+            bridge.closeSubpath()
+            shape = shape.united(bridge)
+        mic_shape = QPainterPath()
+        mic_shape.addEllipse(drop, mr, mr)
+        if neck > 0.0:
+            p.drawPath(shape.united(mic_shape))
+        else:
+            p.drawPath(shape)
+            p.setBrush(QBrush(_MIC_FILL_HOT if self._mic_hot else _DOT_FILL))
+            p.drawPath(mic_shape)
+        # The mic glyph fades in as the drop reaches full size.
+        alpha = max(0.0, min(1.0, (self._mic_t - 0.6) / 0.3))
+        if alpha > 0.0:
+            color = QColor(_MIC_ICON_HOT if self._mic_hot else _MIC_ICON)
+            color.setAlphaF(alpha)
+            draw_mic_icon(p, drop, mr, color)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._t == 0.0 and not self._card_on:
+            self._paint_idle(p)
+            return
         kind, w, h, payload = morph_shape(self._t, self._dot,
                                           _PILL_WIDTH, _PILL_HEIGHT)
         cx = self.width() / 2

@@ -1,4 +1,4 @@
-"""Shared look for the app windows: warm dark palette, serif headings, logo.
+"""Shared look for the app windows: AMOLED black, serif headings, logo.
 
 One place for colors and fonts so the main window, History, Settings, the
 login screen and the setup window stay consistent.
@@ -12,11 +12,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 
 # ── Palette ──────────────────────────────────────────────────────────────────
-BG = "#262624"            # page background
-SIDEBAR = "#1f1e1d"
-SURFACE = "#30302e"       # cards, inputs
-SURFACE_HOVER = "#383835"
-BORDER = "#3d3d3a"
+BG = "#000000"            # page background (AMOLED black)
+SIDEBAR = "#000000"
+SURFACE = "#121212"       # cards, inputs
+SURFACE_HOVER = "#1c1c1c"
+BORDER = "#262626"
 TEXT = "#ece9e1"
 TEXT_MUTED = "#a09d96"
 TEXT_FAINT = "#75726c"

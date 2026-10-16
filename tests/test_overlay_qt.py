@@ -36,7 +36,7 @@ def test_idle_dots_are_small():
     win = OverlayWindow()
     win.start()
     assert win._dot == _DOT_PX <= 10
-    assert win.width() < 50 and win.height() < 20
+    assert win.width() < 120 and win.height() < 32  # dots + room for the mic
 
 
 def test_level_bars_decay_toward_silence():
@@ -109,7 +109,7 @@ def test_dots_open_to_pill_then_card_then_collapse():
     _settle(win)
     assert win._t == 0.0
     assert not win._pill.isVisible() and not win._card_on
-    assert win.width() < 50  # back to the three small dots
+    assert win.width() < 120  # back to the three small dots
 
 
 def test_hover_keeps_card_and_leave_restarts_countdown():
@@ -166,3 +166,58 @@ def test_repeated_recording_updates_keep_the_timer():
     win._apply_state("recording", "more partial text")
     assert win._session_id == session
     assert win._elapsed.msecsSinceReference() == started
+
+
+def test_mic_drop_pulls_out_then_neck_snaps():
+    from src.ui.overlay_qt import _MIC_D, _NECK_SNAP, mic_drop
+    dx0, r0, neck0 = mic_drop(0.0, 8)
+    assert abs(dx0) < 1e-9 and r0 == 4 and neck0 > 0  # still inside the right dot
+    _, _, neck_mid = mic_drop(_NECK_SNAP + 0.01, 8)
+    assert neck_mid == 0  # snapped
+    dx1, r1, _ = mic_drop(1.0, 8)
+    assert r1 == _MIC_D / 2
+    assert dx1 > 8 / 2 + _MIC_D / 2  # settled clear of the dot, to the right
+
+
+def test_hover_brings_mic_out_and_click_starts_live_typing(monkeypatch):
+    import src.ui.overlay_qt as ov
+    win = OverlayWindow()
+    clicked = []
+    win.set_mic_callback(lambda: clicked.append(True))
+    win.start()
+    _settle(win)
+    # Cursor over the dots -> mic animates out.
+    monkeypatch.setattr(ov.QCursor, "pos", staticmethod(lambda: win.geometry().center()))
+    win._poll_hover()
+    assert win._mic_open
+    win._mic_anim.setCurrentTime(win._mic_anim.duration())
+    assert win._mic_t == 1.0
+    # Clicking the mic calls the live-typing callback and tucks the mic away.
+    win._on_mic()
+    _app.processEvents()
+    assert clicked == [True]
+    assert win._mic_t == 0.0 and not win._mic_open
+
+
+def test_cursor_leaving_tucks_mic_back(monkeypatch):
+    import src.ui.overlay_qt as ov
+    from PySide6.QtCore import QPoint
+    win = OverlayWindow()
+    win.start()
+    _settle(win)
+    monkeypatch.setattr(ov.QCursor, "pos", staticmethod(lambda: win.geometry().center()))
+    win._poll_hover()
+    monkeypatch.setattr(ov.QCursor, "pos", staticmethod(lambda: QPoint(-5000, -5000)))
+    win._poll_hover()
+    assert not win._mic_open
+    win._mic_anim.setCurrentTime(win._mic_anim.duration())
+    assert win._mic_t == 0.0
+
+
+def test_dictation_start_hides_mic():
+    win = OverlayWindow()
+    win.start()
+    win._mic_t, win._mic_open = 1.0, True
+    win._apply_state("recording", "")
+    assert win._mic_t == 0.0 and not win._mic_open
+    assert not win._hover_timer.isActive()

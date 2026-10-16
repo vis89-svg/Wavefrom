@@ -33,7 +33,7 @@ KEYS_URL = "https://console.groq.com/keys"
 TEST_SENTENCE = "Hello, this is my first dictation with Waveform."
 
 _STYLE = """
-QDialog { background-color: #262624; }
+QDialog { background-color: #000000; }
 QLabel { color: #a09d96; font: 12px 'Segoe UI'; }
 QLabel#stepTitle { color: #ece9e1; font: bold 13px 'Segoe UI'; }
 QLabel#stepNum {
@@ -45,13 +45,13 @@ QLabel#ok { color: #7fa36b; }
 QLabel#error { color: #d1584f; }
 QWidget#step[active="false"] QLabel { color: #75726c; }
 QLineEdit, QPlainTextEdit {
-    background: #30302e; color: #ece9e1; border: 1px solid #3d3d3a;
+    background: #121212; color: #ece9e1; border: 1px solid #262626;
     border-radius: 6px; padding: 7px 10px; font: 12px 'Segoe UI';
 }
 QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #c8744f; }
-QLineEdit:disabled, QPlainTextEdit:disabled { color: #75726c; border-color: #30302e; }
+QLineEdit:disabled, QPlainTextEdit:disabled { color: #75726c; border-color: #121212; }
 QCheckBox { color: #a09d96; font: 11px 'Segoe UI'; spacing: 8px; }
-QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #3d3d3a; border-radius: 4px; background: #30302e; }
+QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #262626; border-radius: 4px; background: #121212; }
 QCheckBox::indicator:checked { background: #c8744f; border-color: #c8744f; }
 QPushButton {
     background: #c8744f; color: #fff; border: none; border-radius: 6px;
@@ -59,9 +59,9 @@ QPushButton {
 }
 QPushButton:hover { background: #d4865f; }
 QPushButton:pressed { background: #b5663f; }
-QPushButton:disabled { background: #30302e; color: #75726c; }
-QPushButton#secondary { background: #3d3d3a; }
-QPushButton#secondary:hover { background: #45443f; }
+QPushButton:disabled { background: #121212; color: #75726c; }
+QPushButton#secondary { background: #262626; }
+QPushButton#secondary:hover { background: #1c1c1c; }
 """
 
 

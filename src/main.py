@@ -569,6 +569,11 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
             return
         threading.Thread(target=_capture_thread, daemon=True).start()
 
+    if overlay:
+        # The hover mic beside the idle dots starts hands-free live typing,
+        # exactly like the live hotkey.
+        overlay.set_mic_callback(on_press_live)
+
     hold_hotkey = HotkeyController("hold", current_settings["hotkey"],
                                    on_press_hold, on_release_hold)
     live_hotkey = HotkeyController("tap", current_settings["live_hotkey"],

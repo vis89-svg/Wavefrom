@@ -25,13 +25,13 @@ log = logging.getLogger(__name__)
 
 _SHELL_STYLE = f"""
 QMainWindow {{ background-color: {T.BG}; }}
-QWidget#sidebar {{ background-color: {T.SIDEBAR}; border-right: 1px solid #2c2b29; }}
+QWidget#sidebar {{ background-color: {T.SIDEBAR}; border-right: 1px solid #141414; }}
 QPushButton#navBtn {{
     background: transparent; color: {T.TEXT_MUTED}; border: none;
     border-radius: 8px; padding: 9px 12px; font: 14px '{T.SANS}';
     text-align: left;
 }}
-QPushButton#navBtn:hover {{ background: #2a2927; color: {T.TEXT}; }}
+QPushButton#navBtn:hover {{ background: #141414; color: {T.TEXT}; }}
 QPushButton#navBtn:checked {{ background: {T.ACCENT_SOFT}; color: {T.TEXT}; }}
 QStackedWidget {{ background: {T.BG}; }}
 {T.MENUS}
