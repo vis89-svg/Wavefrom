@@ -33,6 +33,8 @@ SILENCE_PERIOD_SECS = 1.5
 MAX_SILENCE_SECS = 5.0
 MAX_RECORD_SECS = 120.0
 MAX_PROMPT_CHARS = 400
+DROP_RATIO = 0.6  # full pass below this share of slice words = likely dropped audio
+MIN_WORDS_FOR_DROP_CHECK = 20
 TRIM_PAD_SECS = 0.3  # silence kept around speech when trimming the final pass
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
 _NO_SPEECH_PROB_THRESHOLD = 0.6  # Whisper's own "probably not speech" signal
@@ -516,7 +518,7 @@ class DictationEngine:
             self._wait_hold_release()
             from src.inject import capture_typing_context
             baseline = capture_typing_context()
-            quick_base = self._full_pass(wav_bytes) or raw
+            quick_base = self._pick_final(self._full_pass(wav_bytes), raw)
             quick_base = strip_trailing_repeat(collapse_adjacent_repeats(quick_base))
             if quick_base[-1] not in PUNCT:
                 quick_base += "."
@@ -590,7 +592,8 @@ class DictationEngine:
             # The slices are only a live preview: 3s windows give Whisper too
             # little context, and stitching them drops/duplicates words at the
             # seams. The single whole-recording pass replaces them outright.
-            final = (self._full_pass(wav_bytes) if wav_bytes else "") or raw
+            final = self._pick_final(
+                self._full_pass(wav_bytes) if wav_bytes else "", raw)
 
             # Final safety net: collapse adjacent loops and drop trailing
             # echoes anywhere in the assembled text before cleanup/typing.
@@ -960,6 +963,18 @@ class DictationEngine:
         except Exception as e:
             log.warning("Full-audio transcription failed, using merged slices: %s", e)
             return ""
+
+    def _pick_final(self, full: str, raw: str) -> str:
+        """Prefer the whole-recording pass, unless it came back far shorter
+        than the live slices heard -- a sign Whisper skipped a stretch of
+        long audio. The slices then keep the content instead of losing it."""
+        full_n, raw_n = len(tokenize(full)), len(tokenize(raw))
+        log.info("Full pass: %d words (live slices: %d words)", full_n, raw_n)
+        if full and raw_n >= MIN_WORDS_FOR_DROP_CHECK                 and full_n < DROP_RATIO * raw_n:
+            log.warning("Full pass looks truncated (%d vs %d words); "
+                        "using the live slice transcript", full_n, raw_n)
+            return raw
+        return full or raw
 
     def _apply_corrections(self, text: str) -> str:
         """User correction map + fuzzy glossary fix-ups, before cleanup."""

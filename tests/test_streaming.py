@@ -1200,3 +1200,12 @@ def test_engine_copy_to_clipboard_copies_text(monkeypatch):
         result = engine.copy_to_clipboard()
         assert result == "hello world, everyone here."
         mock_copy.assert_called_once_with("hello world, everyone here.")
+
+def test_truncated_full_pass_falls_back_to_slices():
+    engine = make_engine(FakeTranscriber(["unused"]), None)
+    raw = " ".join(f"word{i}" for i in range(50))
+    assert engine._pick_final("word0 word1 word2", raw) == raw  # 3 vs 50 words
+    full = " ".join(f"word{i}" for i in range(45))
+    assert engine._pick_final(full, raw) == full  # close enough: keep full pass
+    assert engine._pick_final("", raw) == raw
+    assert engine._pick_final("hi there", "hi") == "hi there"  # short: no check

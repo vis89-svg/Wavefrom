@@ -1,15 +1,18 @@
-"""Persistent dock overlay: three idle dots that morph into one box (PySide6).
+"""Persistent dock overlay: idle dots -> slim pill -> result card (PySide6).
 
 A single always-on-top window anchored bottom-center, just above the taskbar:
-  1. **Idle** -- three small pen-point dots (black, thin white border), always
+  1. **Idle** -- three small pen-point dots (black, muted brown ring), always
      visible and click-through.
-  2. **Live box** -- when a dictation starts the outer dots slide into the
-     middle one, which stretches into a box: status dot + "Recording" (then
-     "Transcribing" / "Cleaning up"), level bars, and a Stop button.
-  3. **Review** -- the same box grows to show the final text with Polish /
-     Send / Clipboard / X.
+  2. **Pill** -- when a dictation starts the outer dots slide into the middle
+     one, which stretches into a slim pill: status dot, thin live waveform
+     and a timer. A small X (stop) appears on hover. While transcribing /
+     cleaning up, the waveform turns into a soft shimmer.
+  3. **Card** -- once the text is ready, a small card appears above the pill
+     with the full text (scrolls when long) and quiet icon buttons (Polish /
+     Send / Copy).
+     It fades out after 10 s unless the mouse is over it.
 
-Closing reverses the morph: the box shrinks back into the three dots.
+Closing reverses the morph: the pill shrinks back into the three dots.
 """
 from __future__ import annotations
 
@@ -19,16 +22,19 @@ import math
 import threading
 import time
 
-from PySide6.QtCore import (QEasingCurve, QPointF, QRect, QRectF, Qt, QTimer,
+from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QPointF,
+                            QPropertyAnimation, QRect, QRectF, Qt, QTimer,
                             QVariantAnimation, Signal)
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -49,15 +55,6 @@ _user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 
 # ── State helpers ─────────────────────────────────────────────────────────────
-_STATE_LABELS = {
-    "recording": "Recording",
-    "transcribing": "Transcribing…",
-    "cleaning": "Cleaning up…",
-    "done": "Done",
-    "error": "Error",
-    "idle": "Idle",
-}
-
 _STATE_COLORS = {
     "recording": "#e5484d",
     "transcribing": "#f5a623",
@@ -68,24 +65,34 @@ _STATE_COLORS = {
 }
 
 _LEVEL_DECAY = 0.85
-_BAR_COUNT = 14
-_AUTO_DISMISS_MS = 15000
+_BAR_COUNT = 22
+_AUTO_DISMISS_MS = 10000
+_CARD_FADE_IN_MS = 180
+_CARD_FADE_OUT_MS = 300
 
 # ── Shape geometry ────────────────────────────────────────────────────────────
-_BOX_WIDTH = 440
-_BOX_RADIUS = 14.0
+_PILL_WIDTH = 200
+_PILL_HEIGHT = 40
 _DOT_PX = 8               # idle dot diameter (logical px; scales with Windows DPI)
 _DOT_GAP_RATIO = 0.75     # gap between dots, relative to the diameter
-_DOT_BORDER = 1.5         # white ring around each idle dot
+_DOT_BORDER = 1.5         # ring around each idle dot
 _MERGE_PHASE = 0.35       # morph progress spent sliding the dots together
-_MARGIN = 3               # antialiasing room around the painted shape
-_TASKBAR_GAP = 14         # px between the shape and the taskbar
+_MARGIN = 3               # antialiasing room around the painted pill
+_TASKBAR_GAP = 14         # px between the pill and the taskbar
 _OPEN_MS = 340
 _CLOSE_MS = 280
-_RESIZE_MS = 200
+
+_CARD_WIDTH = 360
+_CARD_SHADOW = 10         # room around the card for its soft shadow
+_CARD_GAP = 4             # space between the card's shadow box and the pill
+_CARD_RADIUS = 14.0
+_CARD_TEXT_MAX_H = 170    # ~8 lines of text before the card scrolls
 
 _DOT_FILL = QColor(0, 0, 0)
-_BOX_FILL = QColor(21, 23, 28, 248)
+_DOT_RING = QColor("#7A5230")
+_PILL_FILL = QColor(17, 18, 22, 245)
+_PILL_BORDER = QColor(255, 255, 255, 40)
+_CARD_FILL = QColor(28, 30, 36, 250)
 
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -99,7 +106,7 @@ def _ease(t: float) -> float:
 
 
 def morph_shape(t: float, dot: float, box_w: float, box_h: float):
-    """Shape of the overlay at morph progress `t` (0 = dots, 1 = box).
+    """Shape of the pill at morph progress `t` (0 = dots, 1 = pill).
 
     Returns (kind, w, h, payload): for kind "dots", payload is the centre
     offset of the outer dots from the middle one; for "box", it is the corner
@@ -113,8 +120,13 @@ def morph_shape(t: float, dot: float, box_w: float, box_h: float):
     b = _ease((t - _MERGE_PHASE) / (1 - _MERGE_PHASE))
     w = _lerp(dot, max(box_w, dot), b)
     h = _lerp(dot, max(box_h, dot), b)
-    radius = _lerp(dot / 2, _BOX_RADIUS, b)
+    radius = min(w, h) / 2  # stays fully rounded: dot -> capsule
     return "box", w, h, radius
+
+
+def format_elapsed(ms: int) -> str:
+    secs = max(0, int(ms // 1000))
+    return f"{secs // 60}:{secs % 60:02d}"
 
 
 # ── Win32 helpers ─────────────────────────────────────────────────────────────
@@ -137,15 +149,32 @@ def _set_window_ex_style(hwnd: int, interactive: bool) -> None:
 
 # ── Painted widgets ───────────────────────────────────────────────────────────
 class WaveformBars(QWidget):
-    """Custom-painted level bars driven by the engine's set_level(db) feed."""
+    """Thin white level bars fed by set_level(db); in "shimmer" mode the bars
+    rest low and a soft highlight sweeps across them (busy, not listening)."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._levels: list[float] = [-70.0] * _BAR_COUNT
+        self._shimmer = False
         self._t0 = time.monotonic()
-        self.setFixedHeight(30)
-        self.setMinimumWidth(200)
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self.update)
+        self.setFixedHeight(20)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_shimmer(self, on: bool) -> None:
+        self._shimmer = on
+        self._t0 = time.monotonic()
+        if on:
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def reset(self) -> None:
+        self._levels = [-70.0] * _BAR_COUNT
+        self.update()
 
     def push_level(self, db: float) -> None:
         self._levels.append(float(db))
@@ -161,25 +190,36 @@ class WaveformBars(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = self.width()
-        h = self.height()
-        bw = max((w - (_BAR_COUNT - 1) * 3) / _BAR_COUNT, 4)
-        pulse = 0.75 + 0.25 * ((time.monotonic() - self._t0) % 0.9 / 0.9)
+        w, h = self.width(), self.height()
+        n = _BAR_COUNT
+        step = w / n
+        bw = max(2.0, step * 0.45)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(_STATE_COLORS["recording"])))
+        if self._shimmer:
+            # A soft highlight sweeping left to right across resting bars.
+            pos = ((time.monotonic() - self._t0) % 1.4) / 1.4 * (n + 6) - 3
+            for i in range(n):
+                glow = math.exp(-((i - pos) ** 2) / 6.0)
+                c = QColor(255, 255, 255, int(60 + 170 * glow))
+                bar_h = 3.0 + 5.0 * glow
+                p.setBrush(QBrush(c))
+                p.drawRoundedRect(QRectF(i * step, (h - bar_h) / 2, bw, bar_h),
+                                  bw / 2, bw / 2)
+            return
+        p.setBrush(QBrush(QColor(255, 255, 255, 225)))
         for i, db in enumerate(self._levels):
             frac = max(0.0, min(1.0, (db + 70.0) / 60.0))
-            bar_h = max(3.0, frac * (h - 4) * pulse)
-            x0 = i * (bw + 3)
-            p.drawRoundedRect(QRectF(x0, (h - bar_h) / 2, bw, bar_h), 2, 2)
+            bar_h = max(3.0, frac * h)
+            p.drawRoundedRect(QRectF(i * step, (h - bar_h) / 2, bw, bar_h),
+                              bw / 2, bw / 2)
 
 
 class StatusDot(QWidget):
-    """Round status light; pulses while recording."""
+    """Small round status light; pulses while recording."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedSize(14, 14)
+        self.setFixedSize(10, 10)
         self._color = QColor(_STATE_COLORS["idle"])
         self._pulse = False
         self._t0 = time.monotonic()
@@ -206,159 +246,171 @@ class StatusDot(QWidget):
             c.setAlphaF(0.55 + 0.45 * (0.5 + 0.5 * math.cos(phase * 2 * math.pi)))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(c))
-        p.drawEllipse(QRectF(1, 1, 12, 12))
+        p.drawEllipse(QRectF(1, 1, 8, 8))
 
 
 # ── Styles ────────────────────────────────────────────────────────────────────
-_BTN_BASE = (
-    "QPushButton {{ "
-    "  background: {bg}; color: #fff; border: none; border-radius: 6px; "
-    "  padding: 0 {pad}px; font: 11px 'Segoe UI'; "
-    "}}"
-    "QPushButton:hover {{ background: {hover}; }}"
-    "QPushButton:disabled {{ background: #3a3f48; color: #777; }}"
+_TIMER_STYLE = ("color: #c9ced6; font: 11px 'Segoe UI'; background: transparent;")
+_X_BTN = (
+    "QPushButton { background: transparent; color: #8a8f98; border: none; "
+    "  border-radius: 9px; font: 11px 'Segoe UI'; padding: 0; }"
+    "QPushButton:hover { background: #2e323a; color: #ffffff; }"
 )
-_BTN_STOP = _BTN_BASE.format(bg="#e5484d", hover="#ff5b60", pad=12)
-_BTN_POLISH = _BTN_BASE.format(bg="#4a90d9", hover="#5ba0e0", pad=14)
-_BTN_SEND = _BTN_BASE.format(bg="#5090d0", hover="#60a0e0", pad=14)
-_BTN_CLIP = _BTN_BASE.format(bg="#5090d0", hover="#60a0e0", pad=12)
-_BTN_CLOSE = (
-    "QPushButton { background: #3a4048; color: #d7dbe0; border: none; "
-    "  border-radius: 6px; padding: 0 10px; font: 11px 'Segoe UI'; }"
-    "QPushButton:hover { background: #e5484d; color: #fff; }"
+_ICON_BTN = (
+    "QPushButton { background: transparent; color: #9aa0a9; border: none; "
+    "  border-radius: 8px; padding: 0 10px; font: 12px 'Segoe UI'; }"
+    "QPushButton:hover { background: #2e323a; color: #ffffff; }"
+    "QPushButton:disabled { color: #555a63; }"
 )
-_REVIEW_TEXT = """
-QTextEdit {
-    background: #0f1115; color: #e6e9ee; border: none;
-    border-radius: 8px; padding: 6px; font: 12px 'Segoe UI';
-}
-"""
-_HINT_STYLE = "color: #6a6e78; font: 10px 'Segoe UI'; background: transparent;"
-_PREVIEW_STYLE = "color: #b9c0c9; font: 12px 'Segoe UI'; background: transparent;"
+_PREVIEW_STYLE = "color: #e6e9ee; font: 13px 'Segoe UI'; background: transparent;"
+_SCROLLBAR_W = 6
+_SCROLL_STYLE = (
+    "QScrollArea { background: transparent; border: none; }"
+    "QScrollArea > QWidget > QWidget { background: transparent; }"
+    f"QScrollBar:vertical {{ background: transparent; width: {_SCROLLBAR_W}px; margin: 0; }}"
+    "QScrollBar::handle:vertical { background: #3a3f48; border-radius: 3px; min-height: 24px; }"
+    "QScrollBar::handle:vertical:hover { background: #555b66; }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
+)
+_CAPTION_STYLE = "font: 11px 'Segoe UI'; background: transparent;"
 
 
-def _state_label_style(color: str) -> str:
-    return (f"color: {color}; font: bold 13px 'Segoe UI'; "
-            "background: transparent;")
-
-
-# ── Box content ───────────────────────────────────────────────────────────────
-class _BoxContent(QWidget):
-    """Everything shown inside the box: a shared header, then either the
-    live page (level bars + preview) or the review page (text + actions)."""
+# ── Pill content ──────────────────────────────────────────────────────────────
+class _PillContent(QWidget):
+    """Status dot + waveform + timer, with an X shown on hover."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 14, 12)
-        lay.setSpacing(8)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(8)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(15, 0, 10, 0)
+        lay.setSpacing(10)
         self._dot = StatusDot()
-        head.addWidget(self._dot)
-        self._state_lbl = QLabel("Idle")
-        self._state_lbl.setStyleSheet(_state_label_style(_STATE_COLORS["idle"]))
-        head.addWidget(self._state_lbl)
-        head.addStretch()
-        self._stop_btn = QPushButton("■ Stop")
-        self._stop_btn.setStyleSheet(_BTN_STOP)
-        self._stop_btn.setFixedHeight(26)
-        head.addWidget(self._stop_btn)
-        self._close_btn = QPushButton("X")
-        self._close_btn.setStyleSheet(_BTN_CLOSE)
-        self._close_btn.setFixedSize(32, 26)
-        head.addWidget(self._close_btn)
-        lay.addLayout(head)
-
-        # Live page
-        self._live = QWidget()
-        live_lay = QVBoxLayout(self._live)
-        live_lay.setContentsMargins(0, 0, 0, 0)
-        live_lay.setSpacing(6)
+        lay.addWidget(self._dot, alignment=Qt.AlignmentFlag.AlignVCenter)
         self._waveform = WaveformBars()
-        live_lay.addWidget(self._waveform)
+        lay.addWidget(self._waveform, stretch=1,
+                      alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._timer_lbl = QLabel("0:00")
+        self._timer_lbl.setStyleSheet(_TIMER_STYLE)
+        self._timer_lbl.setFixedWidth(30)
+        self._timer_lbl.setAlignment(Qt.AlignmentFlag.AlignRight
+                                     | Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self._timer_lbl)
+        self._x_btn = QPushButton("✕")
+        self._x_btn.setStyleSheet(_X_BTN)
+        self._x_btn.setFixedSize(18, 18)
+        self._x_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Keep the X's slot in the layout while hidden, so the timer doesn't
+        # jump sideways every time the mouse enters/leaves.
+        sp = self._x_btn.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)
+        self._x_btn.setSizePolicy(sp)
+        self._x_btn.hide()
+        lay.addWidget(self._x_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+
+# ── Result card ───────────────────────────────────────────────────────────────
+class _Card(QWidget):
+    """Two-line preview of the dictation plus quiet icon actions."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._full_text = ""
+        s = _CARD_SHADOW
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(s + 14, s + 11, s + 10, s + 8)
+        lay.setSpacing(6)
+        # Full text, wrapped; the card grows with it up to _CARD_TEXT_MAX_H
+        # and scrolls beyond that.
         self._preview = QLabel("")
-        self._preview.setWordWrap(True)
         self._preview.setStyleSheet(_PREVIEW_STYLE)
-        self._preview.setMaximumHeight(40)
-        self._preview.hide()
-        live_lay.addWidget(self._preview)
-        self._live_hint = QLabel("")
-        self._live_hint.setStyleSheet(_HINT_STYLE)
-        live_lay.addWidget(self._live_hint)
-        lay.addWidget(self._live)
+        self._preview.setWordWrap(True)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._preview.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._scroll = QScrollArea()
+        self._scroll.setWidget(self._preview)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(_SCROLL_STYLE)
+        self._scroll.viewport().setAutoFillBackground(False)
+        lay.addWidget(self._scroll)
 
-        # Review page
-        self._review = QWidget()
-        rev_lay = QVBoxLayout(self._review)
-        rev_lay.setContentsMargins(0, 0, 0, 0)
-        rev_lay.setSpacing(8)
-        self._txt = QTextEdit()
-        self._txt.setReadOnly(True)
-        self._txt.setStyleSheet(_REVIEW_TEXT)
-        self._txt.setFixedHeight(120)
-        rev_lay.addWidget(self._txt)
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setSpacing(6)
-        self._polish_btn = QPushButton("Polish")
-        self._polish_btn.setStyleSheet(_BTN_POLISH)
-        self._polish_btn.setFixedHeight(28)
-        btn_row.addWidget(self._polish_btn)
-        self._send_btn = QPushButton("Send")
-        self._send_btn.setStyleSheet(_BTN_SEND)
-        self._send_btn.setFixedHeight(28)
-        btn_row.addWidget(self._send_btn)
-        self._clip_btn = QPushButton("Clipboard")
-        self._clip_btn.setStyleSheet(_BTN_CLIP)
-        self._clip_btn.setFixedHeight(28)
-        btn_row.addWidget(self._clip_btn)
-        btn_row.addStretch()
-        rev_lay.addLayout(btn_row)
-        lay.addWidget(self._review)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        self._caption = QLabel("")
+        self._caption.setStyleSheet(_CAPTION_STYLE)
+        row.addWidget(self._caption)
+        row.addStretch()
+        self._polish_btn = self._icon_btn("✨  Polish", "Rewrite more cleanly")
+        self._send_btn = self._icon_btn("↵  Send", "Type the text again at the cursor")
+        self._clip_btn = self._icon_btn("⧉  Copy", "Copy to clipboard")
+        for b in (self._polish_btn, self._send_btn, self._clip_btn):
+            row.addWidget(b)
+        lay.addLayout(row)
 
-        self.show_live()
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity)
 
-    def show_live(self) -> None:
-        self._review.hide()
-        self._live.show()
-        self._close_btn.hide()
+    @staticmethod
+    def _icon_btn(text: str, tip: str) -> QPushButton:
+        b = QPushButton(text)
+        b.setStyleSheet(_ICON_BTN)
+        b.setFixedHeight(26)
+        b.setToolTip(tip)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        return b
 
-    def show_review(self) -> None:
-        self._live.hide()
-        self._review.show()
-        self._stop_btn.hide()
-        self._close_btn.show()
+    def set_text(self, text: str) -> None:
+        self._full_text = (text or "").strip()
+        self._preview.setText(self._full_text)
+        inner = _CARD_WIDTH - 2 * _CARD_SHADOW - 24 - _SCROLLBAR_W
+        self._preview.ensurePolished()  # stylesheet font, not the default
+        fm = QFontMetrics(self._preview.font())
+        text_h = fm.boundingRect(QRect(0, 0, inner, 100000),
+                                 int(Qt.TextFlag.TextWordWrap),
+                                 self._full_text or " ").height()
+        self._scroll.setFixedHeight(max(fm.height(), min(text_h + 4, _CARD_TEXT_MAX_H)))
+        self._scroll.verticalScrollBar().setValue(0)
 
-    def set_status(self, text: str, color: str, pulse: bool = False) -> None:
-        self._dot.set_state(color, pulse)
-        self._state_lbl.setText(text)
-        self._state_lbl.setStyleSheet(_state_label_style(color))
+    def set_caption(self, text: str, color: str = "#8a8f98") -> None:
+        self._caption.setText(text)
+        self._caption.setStyleSheet(f"color: {color}; {_CAPTION_STYLE}")
 
-    def set_preview(self, text: str) -> None:
-        text = (text or "").strip()
-        if len(text) > 140:
-            text = "…" + text[-139:]
-        self._preview.setText(text)
-        self._preview.setVisible(bool(text))
-
-    def height_for_box(self) -> int:
+    def total_height(self) -> int:
         self.layout().activate()
-        return max(self.layout().sizeHint().height(), 60)
+        return max(self.layout().sizeHint().height(), 70)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s = _CARD_SHADOW
+        body = QRectF(s, s, self.width() - 2 * s, self.height() - 2 * s)
+        # Soft shadow: stacked, slightly offset translucent outlines.
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(s, 0, -1):
+            a = int(34 * (1 - i / s) ** 2)
+            p.setPen(QPen(QColor(0, 0, 0, a), 1.0))
+            p.drawRoundedRect(body.adjusted(-i, -i + 2, i, i + 2),
+                              _CARD_RADIUS + i, _CARD_RADIUS + i)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1.0))
+        p.setBrush(QBrush(_CARD_FILL))
+        p.drawRoundedRect(body, _CARD_RADIUS, _CARD_RADIUS)
 
 
 # ── Main overlay widget ──────────────────────────────────────────────────────
 class OverlayWindow(QWidget):
     """Persistent dock overlay.  All Qt work happens on the GUI thread.
 
-    The window's own paintEvent draws the morphing shape (dots or box);
-    `_BoxContent` sits on top of it and is only shown once the box is fully
-    open. The window is resized every animation frame to the shape's bounds,
-    anchored at bottom-center, so it never covers more of the screen than
-    what's drawn.
+    The window's paintEvent draws the morphing pill; `_PillContent` sits on
+    the pill once it's fully open, and `_Card` sits above it when a result is
+    shown. The window is resized to exactly what's drawn, anchored at
+    bottom-center, so it never covers more of the screen than it shows.
     """
 
     _sig_state = Signal(str, str)
@@ -374,23 +426,35 @@ class OverlayWindow(QWidget):
         self._session_id = 0
         self._hold_hotkey = ""
         self._live_hotkey = ""
+        self._state = "idle"
+        self._pill_state = "idle"  # last state the pill was set up for
+        self._hovered = False
+        # After an explicit Polish/Send the card stays until closed: the
+        # user's eyes are usually on the target app watching the text change,
+        # and an auto-hide there made a successful action look like a no-op.
+        self._sticky = False
 
         self._polish_callback = None
         self._send_callback = None
         self._clipboard_callback = None
         self._stop_callback = None
 
-        # Morph state: t (0 = dots, 1 = box) and the box's current size.
+        # Morph state: t (0 = dots, 1 = pill).
         self._dot = _DOT_PX
         self._t = 0.0
-        self._box_w = float(_BOX_WIDTH)
-        self._box_h = 100.0
         self._anim: QVariantAnimation | None = None
-        self._anim_from = (0.0, self._box_w, self._box_h)
-        self._anim_to = (0.0, self._box_w, self._box_h)
+        self._anim_from = 0.0
+        self._anim_to = 0.0
+        self._card_on = False
+        self._card_anim: QPropertyAnimation | None = None
+        self._elapsed = QElapsedTimer()
 
         self._build_ui()
         self._connect_signals()
+
+        self._clock = QTimer(self)
+        self._clock.setInterval(250)
+        self._clock.timeout.connect(self._tick_clock)
 
         self._dismiss_timer = QTimer(self)
         self._dismiss_timer.setSingleShot(True)
@@ -405,8 +469,10 @@ class OverlayWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self._content = _BoxContent(self)
-        self._content.hide()
+        self._pill = _PillContent(self)
+        self._pill.hide()
+        self._card = _Card(self)
+        self._card.hide()
 
     def _connect_signals(self) -> None:
         self._sig_state.connect(
@@ -425,12 +491,10 @@ class OverlayWindow(QWidget):
             self._apply_clipboard_result, Qt.ConnectionType.QueuedConnection
         )
 
-        c = self._content
-        c._stop_btn.clicked.connect(self._on_stop)
-        c._polish_btn.clicked.connect(self._on_polish)
-        c._send_btn.clicked.connect(self._on_send)
-        c._clip_btn.clicked.connect(self._on_clipboard)
-        c._close_btn.clicked.connect(self._on_close)
+        self._pill._x_btn.clicked.connect(self._on_x)
+        self._card._polish_btn.clicked.connect(self._on_polish)
+        self._card._send_btn.clicked.connect(self._on_send)
+        self._card._clip_btn.clicked.connect(self._on_clipboard)
 
     # ── Public API (called from ANY thread) ─────────────────────────────
     def set_state(self, state: str, text: str = "") -> None:
@@ -454,14 +518,13 @@ class OverlayWindow(QWidget):
     def set_hotkeys(self, hold: str, live: str) -> None:
         self._hold_hotkey = hold
         self._live_hotkey = live
-        text = f"Hold {hold} · Tap {live}"
-        self._content._live_hint.setText(text)
+        self._pill.setToolTip(f"Hold {hold} · Tap {live}")
 
     def start(self) -> None:
         """Show the idle dots at the dock position immediately."""
         self._visible = True
         self._t = 0.0
-        self._content.hide()
+        self._pill.hide()
         self._apply_geometry()
         self.show()
         self.raise_()
@@ -490,84 +553,157 @@ class OverlayWindow(QWidget):
             self._visible = True
             self.show()
 
-        color = _STATE_COLORS.get(state, "#8a8f98")
-        self._content.set_status(_STATE_LABELS.get(state, state), color,
-                                 pulse=(state == "recording"))
+        self._state = state
         if state == "done":
             self._show_panel(text)
         else:
-            self._content.set_preview(text if state != "recording" else "")
             self._show_live(state)
 
     def _show_live(self, state: str) -> None:
-        """Open (or resize) the box to the live page."""
+        """Open the pill: live waveform while recording, shimmer after."""
+        pill = self._pill
+        pill._x_btn.setEnabled(True)
+        color = _STATE_COLORS.get(state, "#8a8f98")
+        if state == "recording" and self._pill_state == "recording":
+            # The engine re-sends "recording" after every slice; that's the
+            # same dictation, not a new one, so keep the timer and waveform.
+            return
+        self._pill_state = state
         if state == "recording":
             # A fresh dictation is starting -- any Polish/Send/Clipboard
             # result from a previous session that lands after this point is
             # stale and must not be allowed to overwrite this session's text.
             self._session_id += 1
-        self._dismiss_timer.stop()
-        self._content.show_live()
-        # Level bars only mean something while the mic is live; afterwards
-        # the space goes to the text preview.
-        self._content._waveform.setVisible(state == "recording")
-
-        if state == "recording":
+            self._hide_card()
+            self._elapsed.start()
+            self._clock.start()
+            pill._timer_lbl.setText("0:00")
+            pill._waveform.reset()
+            pill._waveform.set_shimmer(False)
+            pill._x_btn.setToolTip("Stop recording")
+            pill._dot.set_state(color, pulse=True)
             self._set_interactive(True)
-            self._content._stop_btn.setEnabled(True)
-            self._content._stop_btn.setText("■ Stop")
-            self._content._stop_btn.show()
         else:
+            self._clock.stop()
+            pill._waveform.set_shimmer(True)
+            pill._dot.set_state(color, pulse=False)
+            pill._x_btn.hide()
             self._make_click_through()
-            self._content._stop_btn.hide()
-
-        self._open_box()
+        self._dismiss_timer.stop()
+        self._open_pill()
 
     def _show_panel(self, text: str) -> None:
-        """Grow the box to the review page."""
-        self._content.show_review()
+        """Pill shows done; the result card appears above it."""
+        self._pill_state = "done"
+        self._clock.stop()
+        pill = self._pill
+        pill._waveform.set_shimmer(False)
+        pill._waveform.reset()
+        pill._dot.set_state(_STATE_COLORS["done"], pulse=False)
+        pill._x_btn.setEnabled(True)
+        pill._x_btn.setToolTip("Close")
         # The prior state (e.g. "cleaning") leaves the window click-through;
-        # the review panel's Polish/Send/Clipboard buttons need real clicks.
+        # the card's Polish/Send/Copy buttons need real clicks.
         self._set_interactive(True)
 
-        self._content._txt.setPlainText((text or "").strip())
+        card = self._card
+        card.set_text(text)
+        card.set_caption("")
         self._polishing = False
-        self._content._polish_btn.setEnabled(True)
-        self._content._polish_btn.setText("Polish")
-        self._content._send_btn.setEnabled(True)
-        self._content._send_btn.setText("Send")
-        self._open_box()
-        self._dismiss_timer.start(_AUTO_DISMISS_MS)
+        self._sticky = False
+        card._polish_btn.setEnabled(True)
+        card._polish_btn.setText("✨  Polish")
+        card._send_btn.setEnabled(True)
+        card._send_btn.setText("↵  Send")
+        self._open_pill()
+        self._show_card()
+        self._restart_dismiss()
 
     def _collapse_to_bar(self) -> None:
-        """Shrink the box back into the three idle dots."""
+        """Hide the card and shrink the pill back into the three dots."""
+        self._state = "idle"
+        self._pill_state = "idle"
         self._dismiss_timer.stop()
-        self._content._dot.set_state(_STATE_COLORS["idle"], False)
+        self._clock.stop()
+        self._pill._x_btn.hide()
+        self._pill._waveform.set_shimmer(False)
+        self._pill._dot.set_state(_STATE_COLORS["idle"], False)
+        self._hide_card()
         self._make_click_through()
-        self._animate_to(0.0, self._box_w, self._box_h, _CLOSE_MS)
+        self._animate_to(0.0, _CLOSE_MS)
+
+    def _tick_clock(self) -> None:
+        if self._elapsed.isValid():
+            self._pill._timer_lbl.setText(format_elapsed(self._elapsed.elapsed()))
+
+    # ── Card show / fade ────────────────────────────────────────────────
+    def _show_card(self) -> None:
+        self._stop_card_anim()
+        self._card_on = True
+        self._card._opacity.setOpacity(0.0)
+        self._card.show()
+        self._apply_geometry()
+        self._fade_card(1.0, _CARD_FADE_IN_MS)
+
+    def _hide_card(self) -> None:
+        self._stop_card_anim()
+        if not self._card_on:
+            return
+        self._card_on = False
+        self._card.hide()
+        self._apply_geometry()
+
+    def _stop_card_anim(self) -> None:
+        if self._card_anim is not None:
+            self._card_anim.stop()
+            self._card_anim = None
+
+    def _fade_card(self, to: float, ms: int, then=None) -> None:
+        self._stop_card_anim()
+        anim = QPropertyAnimation(self._card._opacity, b"opacity", self)
+        anim.setStartValue(self._card._opacity.opacity())
+        anim.setEndValue(to)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        if then is not None:
+            anim.finished.connect(then)
+        self._card_anim = anim
+        anim.start()
+
+    def _restart_dismiss(self) -> None:
+        if self._card_on and not self._hovered and not self._sticky:
+            self._dismiss_timer.start(_AUTO_DISMISS_MS)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hovered = True
+        if self._state in ("recording", "done"):
+            self._pill._x_btn.show()
+        if self._card_on:
+            # Hovering keeps the card: cancel the countdown and any fade.
+            self._dismiss_timer.stop()
+            self._fade_card(1.0, _CARD_FADE_IN_MS)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hovered = False
+        self._pill._x_btn.hide()
+        self._restart_dismiss()
+        super().leaveEvent(event)
 
     # ── Morph animation ─────────────────────────────────────────────────
-    def _open_box(self) -> None:
-        """Morph to a fully open box sized for the current content."""
-        h = float(self._content.height_for_box())
-        duration = _OPEN_MS if self._t < 1.0 else _RESIZE_MS
-        self._animate_to(1.0, float(_BOX_WIDTH), h, duration)
+    def _open_pill(self) -> None:
+        self._animate_to(1.0, _OPEN_MS)
 
-    def _animate_to(self, t: float, box_w: float, box_h: float,
-                    duration: int) -> None:
+    def _animate_to(self, t: float, duration: int) -> None:
         if self._anim is not None:
             self._anim.stop()
             self._anim = None
-        start = (self._t, self._box_w, self._box_h)
-        end = (t, box_w, box_h)
-        if start == end:
+        if self._t == t:
+            self._anim_to = t
             self._finish_anim()
             return
-        # Content is only shown on a fully open box; during a pure resize of
-        # an already-open box it stays visible and reflows with each frame.
-        if not (start[0] == 1.0 and end[0] == 1.0):
-            self._content.hide()
-        self._anim_from, self._anim_to = start, end
+        self._pill.hide()
+        self._anim_from, self._anim_to = self._t, t
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
@@ -579,52 +715,54 @@ class OverlayWindow(QWidget):
         anim.start()
 
     def _on_anim_frame(self, p) -> None:
-        p = float(p)
-        (t0, w0, h0), (t1, w1, h1) = self._anim_from, self._anim_to
-        self._t = _lerp(t0, t1, p)
-        self._box_w = _lerp(w0, w1, p)
-        self._box_h = _lerp(h0, h1, p)
+        self._t = _lerp(self._anim_from, self._anim_to, float(p))
         self._apply_geometry()
 
     def _finish_anim(self) -> None:
         self._anim = None
-        self._t, self._box_w, self._box_h = self._anim_to
+        self._t = self._anim_to
         self._apply_geometry()
-        if self._t >= 1.0:
-            self._content.show()
-            self._content.raise_()
-        else:
-            self._content.hide()
+        self._pill.setVisible(self._t >= 1.0)
         self.raise_()
         self._force_topmost()
 
     # ── Geometry + painting ─────────────────────────────────────────────
     def _apply_geometry(self) -> None:
-        """Resize/move the window to the current shape, bottom-center."""
-        kind, w, h, _ = morph_shape(self._t, self._dot, self._box_w, self._box_h)
-        win_w = int(math.ceil(w)) + 2 * _MARGIN
-        win_h = int(math.ceil(h)) + 2 * _MARGIN
+        """Resize/move the window to the pill (+ card), bottom-center."""
+        _, w, h, _ = morph_shape(self._t, self._dot, _PILL_WIDTH, _PILL_HEIGHT)
+        pill_w = int(math.ceil(w)) + 2 * _MARGIN
+        pill_h = int(math.ceil(h)) + 2 * _MARGIN
+        win_w, win_h = pill_w, pill_h
+        card_h = 0
+        if self._card_on:
+            card_h = self._card.total_height()
+            win_w = max(win_w, _CARD_WIDTH)
+            win_h = pill_h + _CARD_GAP + card_h
         screen = self.screen() or QApplication.primaryScreen()
         rect = screen.availableGeometry()
         cx = rect.left() + rect.width() / 2
         x = int(round(cx - win_w / 2))
-        y = rect.bottom() + 1 - _TASKBAR_GAP - win_h
+        # The bottom of the pill's painted shape sits _TASKBAR_GAP above the
+        # work area; the margin is transparent padding below it.
+        y = rect.bottom() + 1 - _TASKBAR_GAP + _MARGIN - win_h
         # One setGeometry call (no separate resize + move) so the shape grows
         # upward from its anchor without a one-frame jump.
         self.setGeometry(QRect(x, max(rect.top(), y), win_w, win_h))
-        if kind == "box":
-            self._content.setGeometry(_MARGIN, _MARGIN, int(w), int(h))
+        if self._card_on:
+            self._card.setGeometry((win_w - _CARD_WIDTH) // 2, 0, _CARD_WIDTH, card_h)
+        self._pill.setGeometry(int((win_w - w) / 2), win_h - _MARGIN - int(h),
+                               int(w), int(h))
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         kind, w, h, payload = morph_shape(self._t, self._dot,
-                                          self._box_w, self._box_h)
+                                          _PILL_WIDTH, _PILL_HEIGHT)
         cx = self.width() / 2
         bottom = self.height() - _MARGIN
         if kind == "dots":
-            p.setPen(QPen(QColor(255, 255, 255), _DOT_BORDER))
+            p.setPen(QPen(_DOT_RING, _DOT_BORDER))
             p.setBrush(QBrush(_DOT_FILL))
             r = (self._dot - _DOT_BORDER) / 2
             cy = bottom - self._dot / 2
@@ -633,17 +771,22 @@ class OverlayWindow(QWidget):
             for dx in (-payload, payload, 0.0):
                 p.drawEllipse(QPointF(cx + dx, cy), r, r)
             return
-        # Box: fill and border fade from the dot look to the box look.
+        # Pill: fill and ring fade from the dot look to the pill look.
         b = (self._t - _MERGE_PHASE) / (1 - _MERGE_PHASE)
         b = max(0.0, min(1.0, b))
         fill = QColor(
-            int(_lerp(_DOT_FILL.red(), _BOX_FILL.red(), b)),
-            int(_lerp(_DOT_FILL.green(), _BOX_FILL.green(), b)),
-            int(_lerp(_DOT_FILL.blue(), _BOX_FILL.blue(), b)),
-            int(_lerp(255, _BOX_FILL.alpha(), b)),
+            int(_lerp(_DOT_FILL.red(), _PILL_FILL.red(), b)),
+            int(_lerp(_DOT_FILL.green(), _PILL_FILL.green(), b)),
+            int(_lerp(_DOT_FILL.blue(), _PILL_FILL.blue(), b)),
+            int(_lerp(255, _PILL_FILL.alpha(), b)),
         )
-        border = QColor(255, 255, 255, int(_lerp(255, 70, b)))
-        p.setPen(QPen(border, _lerp(_DOT_BORDER, 1.0, b)))
+        ring = QColor(
+            int(_lerp(_DOT_RING.red(), _PILL_BORDER.red(), b)),
+            int(_lerp(_DOT_RING.green(), _PILL_BORDER.green(), b)),
+            int(_lerp(_DOT_RING.blue(), _PILL_BORDER.blue(), b)),
+            int(_lerp(255, _PILL_BORDER.alpha(), b)),
+        )
+        p.setPen(QPen(ring, _lerp(_DOT_BORDER, 1.0, b)))
         p.setBrush(QBrush(fill))
         rect = QRectF(cx - w / 2 + 0.5, bottom - h + 0.5, w - 1, h - 1)
         p.drawRoundedRect(rect, payload, payload)
@@ -654,34 +797,31 @@ class OverlayWindow(QWidget):
             log.debug("Discarding stale polish result from a previous dictation session")
             return
         self._polishing = False
-        self._content._polish_btn.setEnabled(True)
-        self._content._polish_btn.setText("Polish")
+        card = self._card
+        card._polish_btn.setEnabled(True)
+        card._polish_btn.setText("✨  Polish")
         if result:
-            self._content._txt.setPlainText((result or "").strip())
-            self._content.set_status("Polished", _STATE_COLORS["done"])
-            self._content._send_btn.setEnabled(True)
+            card.set_text(result)
+            card.set_caption("Polished", _STATE_COLORS["done"])
+            card._send_btn.setEnabled(True)
+            self._apply_geometry()
         else:
-            self._content.set_status("Polish failed", _STATE_COLORS["error"])
-        # No auto-dismiss restart here: the user just deliberately asked to see
-        # this result (unlike the automatic post-cleanup panel, where nobody
-        # explicitly asked and auto-hiding if ignored is reasonable). Restarting
-        # a 15s countdown here meant the panel could silently re-collapse while
-        # the user's attention was on the target app watching the on-screen
-        # text update, making a *successful* Polish look like it never updated.
+            card.set_caption("Polish failed", _STATE_COLORS["error"])
 
     def _apply_send_result(self, text: str | None, session_id: int) -> None:
         if session_id != self._session_id:
             log.debug("Discarding stale send result from a previous dictation session")
             return
         self._polishing = False
+        card = self._card
         if text:
-            self._content.set_status("Sent", _STATE_COLORS["done"])
+            card.set_caption("Sent", _STATE_COLORS["done"])
+            card.set_text(text)
+            self._apply_geometry()
         else:
-            self._content.set_status("No polished text", _STATE_COLORS["error"])
-        self._content._send_btn.setEnabled(True)
-        self._content._send_btn.setText("Send")
-        self._content._txt.setPlainText((text or "").strip())
-        # No auto-dismiss restart: see _apply_polish_result.
+            card.set_caption("Nothing to send", _STATE_COLORS["error"])
+        card._send_btn.setEnabled(True)
+        card._send_btn.setText("↵  Send")
 
     def _apply_clipboard_result(self, text: str | None, session_id: int) -> None:
         if session_id != self._session_id:
@@ -689,15 +829,15 @@ class OverlayWindow(QWidget):
             return
         self._polishing = False
         if text:
-            self._content.set_status("Copied", _STATE_COLORS["done"])
+            self._card.set_caption("Copied", _STATE_COLORS["done"])
         else:
-            self._content.set_status("No polished text", _STATE_COLORS["error"])
-        self._dismiss_timer.start(_AUTO_DISMISS_MS)
+            self._card.set_caption("Nothing to copy", _STATE_COLORS["error"])
+        self._restart_dismiss()
 
     # ── Level feed (GUI thread) ─────────────────────────────────────────
     def _on_level(self, db: float) -> None:
-        self._content._waveform.push_level(db)
-        self._content._waveform.tick_decay()
+        self._pill._waveform.push_level(db)
+        self._pill._waveform.tick_decay()
 
     # ── Button handlers ─────────────────────────────────────────────────
     def _on_polish(self) -> None:
@@ -705,8 +845,9 @@ class OverlayWindow(QWidget):
             return
         self._dismiss_timer.stop()
         self._polishing = True
-        self._content._polish_btn.setEnabled(False)
-        self._content._polish_btn.setText("Polishing…")
+        self._sticky = True
+        self._card._polish_btn.setEnabled(False)
+        self._card._polish_btn.setText("✨  Polishing…")
         session_id = self._session_id
         threading.Thread(
             target=self._run_polish, args=(session_id,),
@@ -726,8 +867,9 @@ class OverlayWindow(QWidget):
             return
         self._dismiss_timer.stop()
         self._polishing = True
-        self._content._send_btn.setEnabled(False)
-        self._content._send_btn.setText("Sending…")
+        self._sticky = True
+        self._card._send_btn.setEnabled(False)
+        self._card._send_btn.setText("↵  Sending…")
         session_id = self._session_id
         threading.Thread(
             target=self._run_send, args=(session_id,),
@@ -761,12 +903,19 @@ class OverlayWindow(QWidget):
             result = None
         self._sig_clipboard_result.emit(result, session_id)
 
+    def _on_x(self) -> None:
+        """Pill X: stop while recording, otherwise close."""
+        if self._state == "recording":
+            self._on_stop()
+        else:
+            self._on_close()
+
     def _on_stop(self) -> None:
         if self._stop_callback is None:
             return
         self._dismiss_timer.stop()
-        self._content._stop_btn.setEnabled(False)
-        self._content._stop_btn.setText("Stopping…")
+        # Re-enabled by the next state change (transcribing / done / idle).
+        self._pill._x_btn.setEnabled(False)
         threading.Thread(
             target=self._stop_callback, daemon=True, name="overlay-stop"
         ).start()
@@ -775,7 +924,9 @@ class OverlayWindow(QWidget):
         self._collapse_to_bar()
 
     def _on_auto_dismiss(self) -> None:
-        self._collapse_to_bar()
+        if not self._card_on or self._hovered:
+            return
+        self._fade_card(0.0, _CARD_FADE_OUT_MS, then=self._collapse_to_bar)
 
     # ── Force topmost via Win32 ─────────────────────────────────────────
     def _force_topmost(self) -> None:
