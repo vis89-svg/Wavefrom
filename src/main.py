@@ -487,12 +487,33 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
         current_settings["live_hotkey"] = new_settings.live_hotkey
         hold_hotkey.set_hotkey(new_settings.hotkey)
         live_hotkey.set_hotkey(new_settings.live_hotkey)
-        engine.set_cleaner_mode(bool(new_settings.cleanup_model))
         for f in fields(Settings):
             setattr(settings, f.name, getattr(new_settings, f.name))
+        refresh_clients()
         apply_autostart(new_settings)
         log.info("Settings saved: hold=%s live=%s",
                  new_settings.hotkey, new_settings.live_hotkey)
+
+    def refresh_clients() -> None:
+        """Rebuild the Groq clients from the saved key + current settings.
+
+        The clients are created once at startup; without this, a key pasted
+        into Settings (the normal first-run path) only reached the cleanup
+        client, and every transcription kept failing with the old empty key
+        until the app was restarted.
+        """
+        if settings.local_engine:
+            engine.set_cleaner_mode(bool(settings.cleanup_model))
+            return
+        key = get_api_key()
+        if not key:
+            engine.set_cleaner_mode(False)
+            return
+        new_transcriber, new_cleaner, _ = _build_pipeline(settings, key, inject=False)
+        engine.set_clients(new_transcriber, new_cleaner)
+        from src.streaming import warm_up_transcriber
+        warm_up_transcriber(new_transcriber)
+        log.info("API clients rebuilt with the saved key")
 
     def apply_autostart(s: Settings) -> None:
         try:
@@ -582,6 +603,17 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
     except Exception as e:
         log.warning("Failed to build main window: %s", e)
         main_win = None
+
+    # First run (no key yet): walk the user through getting one and trying it.
+    setup_win = None
+    if not settings.local_engine and not get_api_key():
+        try:
+            from src.ui.setup_window import SetupWindow
+            setup_win = SetupWindow(settings.hotkey, on_key_saved=refresh_clients)
+            QTimer.singleShot(300, lambda: (setup_win.show(), setup_win.raise_(),
+                                            setup_win.activateWindow()))
+        except Exception as e:
+            log.warning("Failed to build setup window: %s", e)
 
     # Show the dock bar AFTER the main window so it sits on top
     if overlay:

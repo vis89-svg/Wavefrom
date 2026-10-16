@@ -1125,6 +1125,14 @@ class DictationEngine:
         else:
             self._cleaner = None
 
+    def set_clients(self, transcriber, cleaner) -> None:
+        """Swap in freshly built API clients (e.g. after a new API key is
+        saved), so the change applies to the next dictation without a
+        restart. A dictation already in flight keeps the clients it started
+        with; that's harmless since each call reads the attribute anew."""
+        self._transcriber = transcriber
+        self._cleaner = cleaner
+
 
 def slice_audio(pcm: np.ndarray, rate: int) -> list[bytes]:
     """Cut a full PCM buffer into the same overlapping slice windows the live
