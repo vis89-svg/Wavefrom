@@ -1,70 +1,162 @@
-"""History page: shows a list of past dictations with search.
+"""History page: past dictations as a feed of cards, grouped by day.
 
-Backed by :mod:`src.history` (SQLite).  Clicking a row shows the full text
-with a Copy button.
+Backed by :mod:`src.history` (SQLite). Each card shows the local time and
+the first lines of the text; click to expand, hover for Copy / Delete.
 """
 from __future__ import annotations
 
 import logging
-import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta
 
 import pyperclip
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
+    QMenu,
+    QMessageBox,
     QPushButton,
-    QSplitter,
-    QTextEdit,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from src.ui import theme as T
+
 log = logging.getLogger(__name__)
 
-_HISTORY_STYLE = """
-QWidget#historyPage {
-    background-color: #1a1d23;
-}
-QLabel { color: #d7dbe0; }
-QLineEdit {
-    background: #20242a; color: #e6e9ee; border: 1px solid #3a4048;
-    border-radius: 6px; padding: 8px 12px; font: 12px 'Segoe UI';
-}
-QLineEdit:focus { border: 1px solid #4a90d9; }
-QListWidget {
-    background: #20242a; color: #d7dbe0; border: 1px solid #3a4048;
-    border-radius: 6px; font: 12px 'Segoe UI';
-}
-QListWidget::item { padding: 8px; }
-QListWidget::item:selected { background: #2a3040; }
-QListWidget::item:hover { background: #252930; }
-QTextEdit {
-    background: #20242a; color: #e6e9ee; border: 1px solid #3a4048;
-    border-radius: 6px; padding: 8px; font: 12px 'Segoe UI';
-}
-QPushButton {
-    background: #4a90d9; color: #fff; border: none; border-radius: 6px;
-    padding: 8px 18px; font: bold 12px 'Segoe UI';
-}
-QPushButton:hover { background: #5ba0e0; }
-QPushButton#clearBtn {
-    background: #e5484d;
-}
-QPushButton#clearBtn:hover {
-    background: #ff5b60;
-}
+_COLLAPSED_LINES = 3
+
+_HISTORY_STYLE = f"""
+QWidget#historyPage {{ background-color: {T.BG}; }}
+QWidget#feed {{ background: transparent; }}
+QFrame#card {{
+    background: {T.SURFACE}; border: 1px solid {T.SURFACE}; border-radius: 12px;
+}}
+QFrame#card:hover {{ border: 1px solid {T.BORDER}; }}
+QLineEdit#search {{ border-radius: 10px; padding: 9px 14px; }}
+QPushButton::menu-indicator {{ image: none; width: 0; }}
+{T.INPUTS}
+{T.BUTTONS}
+{T.SCROLLBARS}
+{T.MENUS}
 """
 
 
+def local_dt(ts: str) -> datetime | None:
+    """Stored UTC ISO timestamp -> local datetime (None if unparseable)."""
+    try:
+        return datetime.fromisoformat(ts).astimezone()
+    except (TypeError, ValueError):
+        return None
+
+
+def day_label(d: date, today: date | None = None) -> str:
+    today = today or date.today()
+    if d == today:
+        return "Today"
+    if d == today - timedelta(days=1):
+        return "Yesterday"
+    if d.year == today.year:
+        return f"{d:%A}, {d.day} {d:%B}"
+    return f"{d.day} {d:%B %Y}"
+
+
+class _Card(QFrame):
+    """One dictation: time + text, expandable, hover actions."""
+
+    def __init__(self, entry: dict, on_delete, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("card")
+        self._entry = entry
+        self._on_delete = on_delete
+        self._expanded = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 12, 12)
+        lay.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(4)
+        dt = local_dt(entry["ts"])
+        self._time = QLabel(dt.strftime("%H:%M") if dt else "")
+        self._time.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
+        top.addWidget(self._time)
+        top.addStretch()
+        self._copy_btn = self._action("⧉  Copy", "Copy to clipboard", self._copy)
+        self._del_btn = self._action("\U0001f5d1  Delete", "Delete this dictation",
+                                     self._delete)
+        top.addWidget(self._copy_btn)
+        top.addWidget(self._del_btn)
+        lay.addLayout(top)
+
+        self._text = QLabel(entry["text"])
+        self._text.setWordWrap(True)
+        # Top-aligned so a collapsed card shows its first lines, not a
+        # vertically centred slice of the middle.
+        self._text.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._text.setStyleSheet(T.label_style(T.TEXT, 14))
+        self._text.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                 QSizePolicy.Policy.Minimum)
+        lay.addWidget(self._text)
+        self._apply_collapse()
+
+    def _action(self, text: str, tip: str, slot) -> QPushButton:
+        b = QPushButton(text)
+        b.setProperty("kind", "ghost")
+        b.setToolTip(tip)
+        b.setFixedHeight(26)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(slot)
+        sp = b.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)  # no layout jump on hover
+        b.setSizePolicy(sp)
+        b.hide()
+        return b
+
+    def _apply_collapse(self) -> None:
+        fm = QFontMetrics(self._text.font())
+        if self._expanded:
+            self._text.setMaximumHeight(16777215)
+        else:
+            self._text.setMaximumHeight(fm.lineSpacing() * _COLLAPSED_LINES)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._expanded = not self._expanded
+            self._apply_collapse()
+        super().mouseReleaseEvent(event)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._copy_btn.show()
+        self._del_btn.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._copy_btn.hide()
+        self._del_btn.hide()
+        super().leaveEvent(event)
+
+    def _copy(self) -> None:
+        try:
+            pyperclip.copy(self._entry["text"])
+            self._copy_btn.setText("✓  Copied")
+            QTimer.singleShot(1500, lambda: self._copy_btn.setText("⧉  Copy"))
+        except Exception as e:
+            log.warning("Clipboard copy failed: %s", e)
+
+    def _delete(self) -> None:
+        self._on_delete(self._entry["id"])
+
+
 class HistoryPage(QWidget):
-    """QWidget showing past dictations with search, list, and detail view."""
+    """Search box + day-grouped feed of past dictations."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -76,85 +168,107 @@ class HistoryPage(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 20, 20, 20)
-        outer.setSpacing(12)
+        outer.setContentsMargins(40, 30, 32, 20)
+        outer.setSpacing(16)
 
         hdr = QHBoxLayout()
         title = QLabel("History")
-        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        title.setStyleSheet(T.page_title_style(28))
         hdr.addWidget(title)
         hdr.addStretch()
-
-        self._clear_btn = QPushButton("Clear All")
-        self._clear_btn.setObjectName("clearBtn")
-        self._clear_btn.setFixedHeight(30)
-        self._clear_btn.clicked.connect(self._on_clear)
-        hdr.addWidget(self._clear_btn)
+        self._menu_btn = QPushButton("•••")
+        self._menu_btn.setProperty("kind", "ghost")
+        self._menu_btn.setFixedSize(40, 32)
+        self._menu_btn.setToolTip("More")
+        menu = QMenu(self)
+        menu.addAction("Clear all history…", self._on_clear)
+        self._menu_btn.setMenu(menu)
+        hdr.addWidget(self._menu_btn)
         outer.addLayout(hdr)
 
-        # Search
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search dictations...")
+        self._search.setObjectName("search")
+        self._search.setPlaceholderText("Search your dictations")
         self._search.textChanged.connect(self._on_search)
         outer.addWidget(self._search)
 
-        # Splitter: list | detail
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-
-        self._list = QListWidget()
-        self._list.currentRowChanged.connect(self._on_select)
-        splitter.addWidget(self._list)
-
-        self._detail = QTextEdit()
-        self._detail.setReadOnly(True)
-        splitter.addWidget(self._detail)
-
-        splitter.setSizes([320, 400])
-        outer.addWidget(splitter, stretch=1)
-
-        # Copy button
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        self._copy_btn = QPushButton("Copy to Clipboard")
-        self._copy_btn.setFixedHeight(32)
-        self._copy_btn.clicked.connect(self._on_copy)
-        self._copy_btn.setEnabled(False)
-        btn_row.addWidget(self._copy_btn)
-        outer.addLayout(btn_row)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._feed = QWidget()
+        self._feed.setObjectName("feed")
+        self._feed_lay = QVBoxLayout(self._feed)
+        self._feed_lay.setContentsMargins(0, 0, 8, 0)
+        self._feed_lay.setSpacing(8)
+        self._scroll.setWidget(self._feed)
+        outer.addWidget(self._scroll, stretch=1)
 
     def refresh(self) -> None:
-        """Reload history from the database."""
+        """Reload history from the database and rebuild the feed."""
         from src.history import search
         self._entries = search(self._search.text())
-        self._list.clear()
+        while self._feed_lay.count():
+            item = self._feed_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self._entries:
+            self._feed_lay.addStretch()
+            self._feed_lay.addWidget(self._empty_state(), alignment=Qt.AlignmentFlag.AlignCenter)
+            self._feed_lay.addStretch()
+            return
+
+        current_day = None
         for e in self._entries:
-            ts = e["ts"][:19].replace("T", " ")
-            preview = e["text"][:60].replace("\n", " ")
-            self._list.addItem(f"{ts}  {preview}")
+            dt = local_dt(e["ts"])
+            d = dt.date() if dt else None
+            if d != current_day:
+                current_day = d
+                lbl = QLabel(day_label(d) if d else "Earlier")
+                lbl.setStyleSheet(T.label_style(T.TEXT_MUTED, 13, "600"))
+                if self._feed_lay.count():
+                    self._feed_lay.addSpacing(10)
+                self._feed_lay.addWidget(lbl)
+            self._feed_lay.addWidget(_Card(e, self._on_delete))
+        self._feed_lay.addStretch()
+
+    def _empty_state(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setSpacing(10)
+        logo = QLabel()
+        logo.setPixmap(T.logo_pixmap(80, T.BORDER))
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(logo)
+        searching = bool(self._search.text().strip())
+        head = QLabel("No matches" if searching else "No dictations yet")
+        head.setStyleSheet(T.page_title_style(20))
+        head.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(head)
+        sub = QLabel("Try a different word." if searching else
+                     "Hold Ctrl + Win and speak — your words will show up here.")
+        sub.setStyleSheet(T.label_style(T.TEXT_FAINT, 13))
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(sub)
+        return box
 
     def _on_search(self, text: str) -> None:
         self.refresh()
 
-    def _on_select(self, row: int) -> None:
-        if 0 <= row < len(self._entries):
-            self._detail.setPlainText(self._entries[row]["text"])
-            self._copy_btn.setEnabled(True)
-        else:
-            self._detail.clear()
-            self._copy_btn.setEnabled(False)
-
-    def _on_copy(self) -> None:
-        row = self._list.currentRow()
-        if 0 <= row < len(self._entries):
-            try:
-                pyperclip.copy(self._entries[row]["text"])
-                self._copy_btn.setText("Copied!")
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(1500, lambda: self._copy_btn.setText("Copy to Clipboard"))
-            except Exception as e:
-                log.warning("Clipboard copy failed: %s", e)
+    def _on_delete(self, entry_id: int) -> None:
+        from src.history import delete
+        delete(entry_id)
+        QTimer.singleShot(0, self.refresh)  # not from inside the card's own click
 
     def _on_clear(self) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle("Clear history")
+        box.setText("Delete all saved dictations? This can't be undone.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes
+                               | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
         from src.history import clear
         clear()
         self.refresh()

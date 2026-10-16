@@ -10,7 +10,6 @@ from dataclasses import asdict
 from typing import Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -27,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.config import DEFAULT_CLEANUP_MODEL
+from src.ui import theme as T
 from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
@@ -52,44 +52,23 @@ def _hotkey_conflict(hotkey: str) -> str | None:
     return _HOTKEY_CONFLICTS.get(_normalize_hotkey(hotkey))
 
 
-_PAGE_STYLE = """
-QWidget#settingsPage {
-    background-color: #1a1d23;
-}
-QGroupBox {
-    color: #d7dbe0; border: 1px solid #2a2e36; border-radius: 8px;
-    margin-top: 14px; padding: 14px 12px 10px 12px;
-    font: bold 12px 'Segoe UI';
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 14px; padding: 0 6px;
-}
-QLabel { color: #b9c0c9; font: 12px 'Segoe UI'; }
-QLineEdit {
-    background: #20242a; color: #e6e9ee; border: 1px solid #3a4048;
-    border-radius: 6px; padding: 7px 10px; font: 12px 'Segoe UI';
-}
-QLineEdit:focus { border: 1px solid #4a90d9; }
-QComboBox {
-    background: #20242a; color: #e6e9ee; border: 1px solid #3a4048;
-    border-radius: 6px; padding: 7px 10px; font: 12px 'Segoe UI';
-}
-QComboBox::drop-down { border: none; }
-QComboBox QAbstractItemView {
-    background: #20242a; color: #e6e9ee; selection-background-color: #2a3040;
-}
-QCheckBox { color: #d7dbe0; font: 12px 'Segoe UI'; spacing: 8px; }
-QCheckBox::indicator {
-    width: 18px; height: 18px; border: 1px solid #3a4048;
-    border-radius: 4px; background: #20242a;
-}
-QCheckBox::indicator:checked { background: #4a90d9; border-color: #4a90d9; }
-QPushButton#saveBtn {
-    background: #4a90d9; color: #fff; border: none; border-radius: 6px;
-    padding: 10px 28px; font: bold 13px 'Segoe UI';
-}
-QPushButton#saveBtn:hover { background: #5ba0e0; }
+_PAGE_STYLE = f"""
+QWidget#settingsPage, QWidget#settingsBody {{ background-color: {T.BG}; }}
+QGroupBox {{
+    color: {T.TEXT}; background: {T.SURFACE}; border: none; border-radius: 12px;
+    margin-top: 30px; padding: 16px 18px 14px 18px;
+    font: 15px '{T.SERIF}';
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin; subcontrol-position: top left;
+    left: 2px; top: 4px; padding: 0;
+}}
+QGroupBox QLineEdit, QGroupBox QComboBox {{ background: {T.BG}; }}
+QLabel {{ color: {T.TEXT_MUTED}; font: 13px '{T.SANS}'; background: transparent; }}
+QPushButton#saveBtn {{ padding: 10px 32px; }}
+{T.INPUTS}
+{T.BUTTONS}
+{T.SCROLLBARS}
 """
 
 
@@ -107,38 +86,39 @@ class SettingsPage(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 16, 20, 16)
-        outer.setSpacing(12)
+        outer.setContentsMargins(40, 30, 32, 20)
+        outer.setSpacing(8)
 
         title = QLabel("Settings")
-        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        title.setStyleSheet("color: #e6e9ee;")
+        title.setStyleSheet(T.page_title_style(28))
         outer.addWidget(title)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
+        container.setObjectName("settingsBody")
         lay = QVBoxLayout(container)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(12)
+        lay.setContentsMargins(0, 0, 12, 0)
+        lay.setSpacing(4)
 
         # ── Hotkeys ──────────────────────────────────────────────────────
         g_hotkeys = QGroupBox("Hotkeys")
         fl = QFormLayout(g_hotkeys)
-        fl.setSpacing(8)
+        fl.setSpacing(10)
+        fl.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self._hotkey_edit = QLineEdit(self._settings.hotkey)
         fl.addRow("Hold hotkey:", self._hotkey_edit)
         self._hotkey_hint = QLabel("Hold, speak, release — types once, cleaned")
-        self._hotkey_hint.setStyleSheet("color: #6a6e78; font: 10px 'Segoe UI';")
+        self._hotkey_hint.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
         fl.addRow("", self._hotkey_hint)
 
         self._live_hotkey_edit = QLineEdit(
             getattr(self._settings, "live_hotkey", "ctrl+alt+d"))
         fl.addRow("Live hotkey:", self._live_hotkey_edit)
         self._live_hint = QLabel("Tap once, then speak — types live as you talk")
-        self._live_hint.setStyleSheet("color: #6a6e78; font: 10px 'Segoe UI';")
+        self._live_hint.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
         fl.addRow("", self._live_hint)
 
         lay.addWidget(g_hotkeys)
@@ -146,7 +126,8 @@ class SettingsPage(QWidget):
         # ── Recognition ──────────────────────────────────────────────────
         g_recog = QGroupBox("Recognition")
         fl2 = QFormLayout(g_recog)
-        fl2.setSpacing(8)
+        fl2.setSpacing(10)
+        fl2.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self._lang_edit = QLineEdit(self._settings.language or "")
         self._lang_edit.setPlaceholderText("blank = auto-detect")
@@ -164,7 +145,8 @@ class SettingsPage(QWidget):
         # ── AI Cleanup ───────────────────────────────────────────────────
         g_ai = QGroupBox("AI Cleanup")
         fl3 = QFormLayout(g_ai)
-        fl3.setSpacing(8)
+        fl3.setSpacing(10)
+        fl3.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self._cleanup_combo = QComboBox()
         self._cleanup_combo.addItems(["off", "correcting", "conservative", "polish"])
@@ -211,6 +193,7 @@ class SettingsPage(QWidget):
         # ── API Key ──────────────────────────────────────────────────────
         g_api = QGroupBox("Groq API Key")
         fl4 = QFormLayout(g_api)
+        fl4.setSpacing(10)
 
         self._key_edit = QLineEdit()
         self._key_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -219,7 +202,8 @@ class SettingsPage(QWidget):
 
         self._key_hint = QLabel(
             'Don\'t have a key? '
-            '<a href="https://console.groq.com/keys">Get a free one &rarr;</a>'
+            f'<a style="color:{T.ACCENT_HOVER}; text-decoration:none" '
+            'href="https://console.groq.com/keys">Get a free one &rarr;</a>'
         )
         self._key_hint.setOpenExternalLinks(True)
         fl4.addRow("", self._key_hint)

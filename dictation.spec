@@ -6,7 +6,7 @@ a = Analysis(
     ["src\\main.py"],
     pathex=["."],
     binaries=[],
-    datas=[(".env.example", ".")],
+    datas=[(".env.example", "."), ("assets/logo_mark.png", "assets")],
     hiddenimports=["keyboard", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets", "PySide6.QtDBus", "sounddevice"],
     hookspath=[],
     runtime_hooks=[],

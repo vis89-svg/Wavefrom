@@ -11,7 +11,6 @@ import logging
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
@@ -24,39 +23,40 @@ from PySide6.QtWidgets import (
 )
 
 from src.auth import create_account, has_account, verify_password
+from src.ui import theme as T
 from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
 
 _WINDOW_STYLE = """
 QMainWindow, QWidget#login {
-    background-color: #1a1d23;
+    background-color: #262624;
 }
 QLabel {
-    color: #d7dbe0;
+    color: #ece9e1;
 }
 QLineEdit {
-    background: #20242a; color: #e6e9ee; border: 1px solid #3a4048;
+    background: #30302e; color: #ece9e1; border: 1px solid #3d3d3a;
     border-radius: 6px; padding: 8px 12px; font: 13px 'Segoe UI';
 }
 QLineEdit:focus {
-    border: 1px solid #4a90d9;
+    border: 1px solid #c8744f;
 }
 QPushButton {
-    background: #4a90d9; color: #fff; border: none; border-radius: 6px;
+    background: #c8744f; color: #fff; border: none; border-radius: 6px;
     padding: 10px 24px; font: bold 13px 'Segoe UI';
 }
 QPushButton:hover {
-    background: #5ba0e0;
+    background: #d4865f;
 }
 QPushButton:pressed {
-    background: #3a80c9;
+    background: #b5663f;
 }
 QPushButton#cancel {
-    background: #3a4048;
+    background: #3d3d3a;
 }
 QPushButton#cancel:hover {
-    background: #505068;
+    background: #45443f;
 }
 """
 
@@ -71,7 +71,8 @@ class LoginWindow(QMainWindow):
         self._is_first_run = not has_account()
 
         self.setWindowTitle(APP_NAME)
-        self.setFixedSize(380, 360 if self._is_first_run else 280)
+        self.setFixedSize(380, 420 if self._is_first_run else 340)
+        self.setWindowIcon(T.app_icon())
         self.setStyleSheet(_WINDOW_STYLE)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -85,8 +86,12 @@ class LoginWindow(QMainWindow):
         lay.setContentsMargins(36, 30, 36, 24)
         lay.setSpacing(10)
 
+        logo = QLabel()
+        logo.setPixmap(T.logo_pixmap(72, T.ACCENT))
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(logo)
         title = QLabel(APP_NAME)
-        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        title.setStyleSheet(T.page_title_style(24))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
         lay.addSpacing(6)
@@ -95,9 +100,8 @@ class LoginWindow(QMainWindow):
             subtitle = QLabel("Create your account")
         else:
             subtitle = QLabel("Log in")
-        subtitle.setFont(QFont("Segoe UI", 11))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #8a8f98;")
+        subtitle.setStyleSheet("color: #a09d96;")
         lay.addWidget(subtitle)
         lay.addSpacing(14)
 
@@ -125,7 +129,7 @@ class LoginWindow(QMainWindow):
             lay.addSpacing(4)
 
         self._error_lbl = QLabel("")
-        self._error_lbl.setStyleSheet("color: #e5484d; font: 11px 'Segoe UI';")
+        self._error_lbl.setStyleSheet("color: #d1584f; font: 11px 'Segoe UI';")
         self._error_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._error_lbl)
         lay.addSpacing(8)

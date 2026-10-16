@@ -131,6 +131,14 @@ def test_polish_makes_card_sticky():
     _settle(win)
     win._on_polish()
     assert not win._dismiss_timer.isActive()
+    # Let the background polish thread deliver its result before `win` can
+    # be garbage-collected (a signal into a deleted window aborts Qt).
+    import time
+    end = time.time() + 3
+    while win._polishing and time.time() < end:
+        _app.processEvents()
+        time.sleep(0.01)
+    assert win._card._preview.text() == "Hello, world."
     win.leaveEvent(None)
     assert not win._dismiss_timer.isActive()  # stays until closed
 

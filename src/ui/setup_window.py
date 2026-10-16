@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.ui import theme as T
 from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
@@ -32,33 +33,35 @@ KEYS_URL = "https://console.groq.com/keys"
 TEST_SENTENCE = "Hello, this is my first dictation with Waveform."
 
 _STYLE = """
-QDialog { background-color: #1a1d23; }
-QLabel { color: #b9c0c9; font: 12px 'Segoe UI'; }
-QLabel#stepTitle { color: #e6e9ee; font: bold 13px 'Segoe UI'; }
+QDialog { background-color: #262624; }
+QLabel { color: #a09d96; font: 12px 'Segoe UI'; }
+QLabel#stepTitle { color: #ece9e1; font: bold 13px 'Segoe UI'; }
 QLabel#stepNum {
-    background: #2a3040; color: #e6e9ee; border-radius: 12px;
+    background: #3a2e28; color: #ece9e1; border-radius: 12px;
     font: bold 12px 'Segoe UI';
 }
-QLabel#stepNum[done="true"] { background: #2f9e5b; }
-QLabel#ok { color: #46c27a; }
-QLabel#error { color: #e5484d; }
-QWidget#step[active="false"] QLabel { color: #5c616b; }
+QLabel#stepNum[done="true"] { background: #6d8f5b; }
+QLabel#ok { color: #7fa36b; }
+QLabel#error { color: #d1584f; }
+QWidget#step[active="false"] QLabel { color: #75726c; }
 QLineEdit, QPlainTextEdit {
-    background: #20242a; color: #e6e9ee; border: 1px solid #3a4048;
+    background: #30302e; color: #ece9e1; border: 1px solid #3d3d3a;
     border-radius: 6px; padding: 7px 10px; font: 12px 'Segoe UI';
 }
-QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #4a90d9; }
-QLineEdit:disabled, QPlainTextEdit:disabled { color: #5c616b; border-color: #2a2e36; }
-QCheckBox { color: #8a8f98; font: 11px 'Segoe UI'; }
+QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #c8744f; }
+QLineEdit:disabled, QPlainTextEdit:disabled { color: #75726c; border-color: #30302e; }
+QCheckBox { color: #a09d96; font: 11px 'Segoe UI'; spacing: 8px; }
+QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #3d3d3a; border-radius: 4px; background: #30302e; }
+QCheckBox::indicator:checked { background: #c8744f; border-color: #c8744f; }
 QPushButton {
-    background: #4a90d9; color: #fff; border: none; border-radius: 6px;
+    background: #c8744f; color: #fff; border: none; border-radius: 6px;
     padding: 8px 18px; font: bold 12px 'Segoe UI';
 }
-QPushButton:hover { background: #5ba0e0; }
-QPushButton:pressed { background: #3a80c9; }
-QPushButton:disabled { background: #2a2e36; color: #5c616b; }
-QPushButton#secondary { background: #3a4048; }
-QPushButton#secondary:hover { background: #505068; }
+QPushButton:hover { background: #d4865f; }
+QPushButton:pressed { background: #b5663f; }
+QPushButton:disabled { background: #30302e; color: #75726c; }
+QPushButton#secondary { background: #3d3d3a; }
+QPushButton#secondary:hover { background: #45443f; }
 """
 
 
@@ -100,6 +103,7 @@ class SetupWindow(QDialog):
         self._bridge.done.connect(self._on_check_done)
 
         self.setWindowTitle(f"Set up {APP_NAME}")
+        self.setWindowIcon(T.app_icon())
         self.setStyleSheet(_STYLE)
         self.setMinimumWidth(480)
 
@@ -107,9 +111,16 @@ class SetupWindow(QDialog):
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(14)
 
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        logo = QLabel()
+        logo.setPixmap(T.logo_pixmap(44, T.ACCENT))
+        head.addWidget(logo)
         title = QLabel(f"Welcome to {APP_NAME}")
-        title.setStyleSheet("color: #e6e9ee; font: bold 20px 'Segoe UI';")
-        lay.addWidget(title)
+        title.setStyleSheet(T.page_title_style(24))
+        head.addWidget(title)
+        head.addStretch()
+        lay.addLayout(head)
         sub = QLabel("Three quick steps and you can dictate anywhere.")
         lay.addWidget(sub)
 

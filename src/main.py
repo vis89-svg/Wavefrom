@@ -478,9 +478,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
             main_win.show()
             main_win.raise_()
             main_win.activateWindow()
-            # Switch to settings page (index 1)
-            if hasattr(main_win, '_stack'):
-                main_win._stack.setCurrentIndex(1)
+            main_win.show_page(1)  # Settings
 
     def on_settings_saved(new_settings: Settings) -> None:
         current_settings["hotkey"] = new_settings.hotkey
