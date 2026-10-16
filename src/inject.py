@@ -155,6 +155,57 @@ def foreground_window_title() -> str:
         return ""
 
 
+_FRIENDLY_APPS = {
+    "code": "VS Code", "chrome": "Chrome", "msedge": "Edge", "firefox": "Firefox",
+    "brave": "Brave", "opera": "Opera", "slack": "Slack", "discord": "Discord",
+    "teams": "Teams", "ms-teams": "Teams", "whatsapp": "WhatsApp",
+    "telegram": "Telegram", "winword": "Word", "excel": "Excel",
+    "powerpnt": "PowerPoint", "outlook": "Outlook", "olk": "Outlook",
+    "onenote": "OneNote", "notepad": "Notepad", "notepad++": "Notepad++",
+    "explorer": "File Explorer", "windowsterminal": "Terminal", "cmd": "Command Prompt",
+    "powershell": "PowerShell", "pwsh": "PowerShell", "obsidian": "Obsidian",
+    "notion": "Notion", "cursor": "Cursor", "claude": "Claude",
+    "chatgpt": "ChatGPT", "zoom": "Zoom", "spotify": "Spotify",
+}
+
+
+def app_display_name(exe_path: str) -> str:
+    """'C:\\...\\Code.exe' -> 'VS Code'; unknown apps -> their exe name."""
+    stem = exe_path.replace("/", "\\").rsplit("\\", 1)[-1]
+    if stem.lower().endswith(".exe"):
+        stem = stem[:-4]
+    return _FRIENDLY_APPS.get(stem.lower(), stem[:1].upper() + stem[1:]) if stem else ""
+
+
+def foreground_app_name() -> str:
+    """Friendly name of the app owning the focused window ("" on failure).
+
+    Recorded with each dictation for the dashboard's Top apps.
+    """
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return ""
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(len(buf))
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return ""
+            return app_display_name(buf.value)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception as e:
+        log.debug("foreground_app_name failed: %s", e)
+        return ""
+
+
 def foreground_window_handle() -> int:
     """HWND of the currently focused window (0 if none / on failure)."""
     try:

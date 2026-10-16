@@ -478,7 +478,7 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
             main_win.show()
             main_win.raise_()
             main_win.activateWindow()
-            main_win.show_page(1)  # Settings
+            main_win.show_page("Settings")
 
     def on_settings_saved(new_settings: Settings) -> None:
         current_settings["hotkey"] = new_settings.hotkey
@@ -591,13 +591,16 @@ def _run_app(settings: Settings, api_key: str, inject: bool = True,
     # Main app shell window (History + Settings pages)
     main_win = None
     try:
+        from src.ui.dashboard_page import DashboardPage
         from src.ui.history_page import HistoryPage
         from src.ui.settings_page import SettingsPage
         from src.ui.main_window import MainWindow
         hist_page = HistoryPage()
         settings_page = SettingsPage(settings, on_save=on_settings_saved)
+        dash_page = DashboardPage(display_name=display_name)
         main_win = MainWindow(hist_page, settings_page,
-                              display_name=display_name)
+                              display_name=display_name,
+                              dashboard_page=dash_page)
         main_win.show()
         main_win.raise_()
         main_win.activateWindow()

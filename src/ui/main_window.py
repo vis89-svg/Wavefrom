@@ -37,14 +37,14 @@ QStackedWidget {{ background: {T.BG}; }}
 {T.MENUS}
 """
 
-_NAV = [("◷", "History"), ("⚙", "Settings")]
+_ICONS = {"Dashboard": "▦", "History": "◷", "Settings": "⚙"}
 
 
 class MainWindow(QMainWindow):
     """Shell window with sidebar + stacked pages."""
 
     def __init__(self, history_page: QWidget, settings_page: QWidget,
-                 display_name: str = "") -> None:
+                 display_name: str = "", dashboard_page: QWidget | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Waveform")
         self.setWindowIcon(T.app_icon())
@@ -82,8 +82,11 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[QPushButton] = []
         self._stack = QStackedWidget()
 
-        for (icon, label), page in zip(_NAV, (history_page, settings_page)):
-            btn = QPushButton(f"{icon}   {label}")
+        pages = [("Dashboard", dashboard_page), ("History", history_page),
+                 ("Settings", settings_page)]
+        self._pages = [(label, page) for label, page in pages if page is not None]
+        for label, page in self._pages:
+            btn = QPushButton(f"{_ICONS.get(label, '')}   {label}")
             btn.setObjectName("navBtn")
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -114,15 +117,17 @@ class MainWindow(QMainWindow):
         outer.addWidget(sidebar)
         outer.addWidget(self._stack, stretch=1)
 
-        # Default to History page
+        # Start on the first page (Dashboard when present)
         if self._nav_buttons:
             self._nav_buttons[0].setChecked(True)
-            self._stack.setCurrentWidget(history_page)
+            self._stack.setCurrentWidget(self._pages[0][1])
 
-    def show_page(self, index: int) -> None:
-        """Select page `index` (0 = History, 1 = Settings) and its nav button."""
-        if 0 <= index < len(self._nav_buttons):
-            self._switch(self._nav_buttons[index], self._stack.widget(index))
+    def show_page(self, name: str) -> None:
+        """Select the page called `name` ("Dashboard", "History", "Settings")."""
+        for btn, (label, page) in zip(self._nav_buttons, self._pages):
+            if label == name:
+                self._switch(btn, page)
+                return
 
     def _switch(self, btn: QPushButton, page: QWidget) -> None:
         for b in self._nav_buttons:
@@ -137,7 +142,7 @@ class MainWindow(QMainWindow):
         self.hide()
 
     def refresh_history(self) -> None:
-        """Refresh the history page (call after a new dictation is recorded)."""
-        page = self._stack.widget(0)
-        if hasattr(page, "refresh"):
-            page.refresh()
+        """Refresh History and Dashboard (call after a new dictation is recorded)."""
+        for label, page in self._pages:
+            if label in ("History", "Dashboard") and hasattr(page, "refresh"):
+                page.refresh()

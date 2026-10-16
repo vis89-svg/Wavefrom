@@ -86,8 +86,16 @@ class TranscriptionClient:
             kwargs["prompt"] = prompt
         if temperature is not None:
             kwargs["temperature"] = temperature
-        response = self._client.audio.transcriptions.create(**kwargs)
-        self.last_rate_limit = self._read_headers()
+        # Raw response so the rate-limit headers are readable (the SDK has no
+        # "last response" attribute; reading one silently returned nothing).
+        raw = self._client.audio.transcriptions.with_raw_response.create(**kwargs)
+        response = raw.parse()
+        self.last_rate_limit = self._read_headers(raw.headers)
+        from src import usage
+        usage.record_transcription(
+            kwargs["model"], audio_bytes,
+            remaining=self.last_rate_limit.remaining_requests,
+            req_limit=_int_or_none(raw.headers.get("x-ratelimit-limit-requests")))
 
         if not verbose:
             return response.text if hasattr(response, "text") else str(response)
@@ -104,10 +112,8 @@ class TranscriptionClient:
         text = response.text if hasattr(response, "text") else str(response)
         return TranscriptResult(text=text, segments=segments)
 
-    def _read_headers(self) -> RateLimitInfo:
-        try:
-            headers = self._client.last_response.headers
-        except Exception:
+    def _read_headers(self, headers=None) -> RateLimitInfo:
+        if headers is None:
             return RateLimitInfo(None, None, None)
         return RateLimitInfo(
             remaining_requests=_int_or_none(headers.get("x-ratelimit-remaining-requests")),

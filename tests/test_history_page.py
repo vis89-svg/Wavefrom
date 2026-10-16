@@ -60,3 +60,6 @@ def test_delete_removes_entry(monkeypatch):
     page = HistoryPage()
     page._feed.findChildren(_Card)[0]._delete()
     assert deleted == [3]
+    # Run the deferred refresh now, while this test's patches are active,
+    # instead of letting it fire during a later test.
+    _app.processEvents()

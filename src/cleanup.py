@@ -165,6 +165,15 @@ def _app_tone_line(title: str) -> str:
     return _APP_TONE_RULE.format(title=title.strip().replace('"', "'"))
 
 
+def _count_usage(model: str, response) -> None:
+    """Dashboard usage stats; never allowed to break a cleanup call."""
+    try:
+        from src import usage
+        usage.record_chat(model, response)
+    except Exception:
+        pass
+
+
 class CleanupClient:
     def __init__(self, api_key: str, model: str = "openai/gpt-oss-20b",
                  mode: str = "correcting", glossary: list[str] | None = None,
@@ -207,6 +216,7 @@ class CleanupClient:
             temperature=0.0,
             timeout=60,
         )
+        _count_usage(self._model, response)
         return (response.choices[0].message.content or "").strip() or transcript
 
     def polish(self, transcript: str, app_hint: str | None = None,
@@ -245,6 +255,7 @@ class CleanupClient:
                 raise TimeoutError("Polish LLM call exceeded 90 seconds")
             except Exception:
                 raise
+        _count_usage(model or self._model, response)
         return response.choices[0].message.content or transcript
 
     def reconcile(self, disputes: list) -> dict[int, str]:
@@ -278,6 +289,7 @@ class CleanupClient:
                 ],
                 temperature=0.1,
             )
+            _count_usage(self._model, response)
             content = response.choices[0].message.content or ""
         except Exception as e:
             import logging

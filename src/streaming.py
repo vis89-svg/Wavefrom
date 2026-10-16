@@ -104,6 +104,7 @@ class DictationEngine:
         self._last_level_report = 0.0
         self._hold_active = False
         self._mode = getattr(config, "mode", "hold")
+        self._target_app = ""
 
     # ------------------------------------------------------------- lifecycle
     def start(self, mode: str | None = None) -> bool:
@@ -140,8 +141,10 @@ class DictationEngine:
         # Save the foreground window so inject_text/paste_text can restore
         # focus to the target app before typing (the keyboard hook may leave
         # focus on the overlay or tray).
-        from src.inject import set_target_hwnd, foreground_window_handle
+        from src.inject import (foreground_app_name, foreground_window_handle,
+                                set_target_hwnd)
         set_target_hwnd(foreground_window_handle())
+        self._target_app = foreground_app_name()  # for the dashboard's Top apps
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
         return True
@@ -694,7 +697,8 @@ class DictationEngine:
         log.info("Dictation finalized: %r", final)
         if self._history is not None and final.strip():
             try:
-                self._history.record(final)
+                self._history.record(final, duration=self._speech_secs(wav_bytes),
+                                     app=getattr(self, "_target_app", "") or None)
             except Exception as e:
                 log.debug("History record failed: %s", e)
             if self.on_history_update:
@@ -963,6 +967,17 @@ class DictationEngine:
         except Exception as e:
             log.warning("Full-audio transcription failed, using merged slices: %s", e)
             return ""
+
+    @staticmethod
+    def _speech_secs(wav_bytes: bytes | None) -> float | None:
+        """Speaking time of the recording (edge silence trimmed), for WPM."""
+        if not wav_bytes:
+            return None
+        try:
+            pcm, rate = pcm_from_wav(wav_bytes)
+            return round(len(trim_silence(pcm, rate)) / rate, 2) if rate else None
+        except Exception:
+            return None
 
     def _pick_final(self, full: str, raw: str) -> str:
         """Prefer the whole-recording pass, unless it came back far shorter
