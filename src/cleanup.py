@@ -165,6 +165,16 @@ def _app_tone_line(title: str) -> str:
     return _APP_TONE_RULE.format(title=title.strip().replace('"', "'"))
 
 
+# The LLM sometimes writes typographic hyphens (U+2011 non-breaking, U+2010)
+# that look like "-" but break search, code and some apps. Only those two are
+# mapped; dashes (en/em) are left alone.
+_HYPHEN_MAP = str.maketrans({"‑": "-", "‐": "-"})
+
+
+def normalize_hyphens(text: str) -> str:
+    return text.translate(_HYPHEN_MAP)
+
+
 def _count_usage(model: str, response) -> None:
     """Dashboard usage stats; never allowed to break a cleanup call."""
     try:
@@ -217,7 +227,7 @@ class CleanupClient:
             timeout=60,
         )
         _count_usage(self._model, response)
-        return (response.choices[0].message.content or "").strip() or transcript
+        return normalize_hyphens((response.choices[0].message.content or "").strip()) or transcript
 
     def polish(self, transcript: str, app_hint: str | None = None,
                model: str | None = None) -> str:
@@ -256,7 +266,7 @@ class CleanupClient:
             except Exception:
                 raise
         _count_usage(model or self._model, response)
-        return response.choices[0].message.content or transcript
+        return normalize_hyphens(response.choices[0].message.content or "") or transcript
 
     def reconcile(self, disputes: list) -> dict[int, str]:
         """Adjudicate transcription disagreements: dispute index -> "A"|"B".

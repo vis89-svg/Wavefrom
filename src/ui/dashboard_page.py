@@ -58,7 +58,7 @@ def _panel(title: str) -> tuple[QFrame, QVBoxLayout]:
     lay.setContentsMargins(20, 16, 20, 16)
     lay.setSpacing(12)
     head = QLabel(title)
-    head.setStyleSheet(f"color: {T.TEXT}; font: 16px '{T.SERIF}'; background: transparent;")
+    head.setStyleSheet(T.heading_style(15, 600))
     lay.addWidget(head)
     return frame, lay
 
@@ -76,7 +76,7 @@ class _Tile(QFrame):
         self._label.setStyleSheet(T.label_style(T.TEXT_MUTED, 12))
         self._value = QLabel("—")
         self._value.setStyleSheet(
-            f"color: {T.TEXT}; font: 30px '{T.SERIF}'; background: transparent;")
+            T.heading_style(28, 600))
         self._caption = QLabel("")
         self._caption.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
         self._caption.setWordWrap(True)
@@ -257,8 +257,6 @@ class DashboardPage(QWidget):
         row.addWidget(usage_panel, stretch=1)
         lay.addLayout(row)
 
-        recent_panel, self._recent_lay = _panel("Recent dictations")
-        lay.addWidget(recent_panel)
         lay.addStretch()
 
     # ── data ────────────────────────────────────────────────────────────
@@ -287,7 +285,6 @@ class DashboardPage(QWidget):
         self._chart.set_data(st.words_per_day)
         self._fill_apps(st)
         self._fill_usage(usage.today())
-        self._fill_recent(entries[:3])
 
     @staticmethod
     def _clear(lay: QVBoxLayout) -> None:
@@ -380,21 +377,3 @@ class DashboardPage(QWidget):
         self._note(self._usage_lay,
                    "Counted on this computer. Free-tier limits are approximate.")
         self._usage_lay.addStretch()
-
-    def _fill_recent(self, entries: list[dict]) -> None:
-        from src.ui.history_page import _Card
-        self._clear(self._recent_lay)
-        if not entries:
-            self._note(self._recent_lay, "Hold Ctrl + Win and speak — your words show up here.")
-            return
-        for e in entries:
-            card = _Card(e, self._on_delete)
-            card.setStyleSheet(f"QFrame#card {{ background: {T.BG}; border: 1px solid {T.BORDER}; "
-                               "border-radius: 10px; }")
-            self._recent_lay.addWidget(card)
-
-    def _on_delete(self, entry_id: int) -> None:
-        from PySide6.QtCore import QTimer
-        from src.history import delete
-        delete(entry_id)
-        QTimer.singleShot(0, self.refresh)

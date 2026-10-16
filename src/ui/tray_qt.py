@@ -8,34 +8,30 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 log = logging.getLogger(__name__)
 
+# Tile gradient (top, bottom) per state: clay when idle, so the tray icon
+# matches the app icon; the colour still signals what Waveform is doing.
 STATE_COLORS = {
-    "idle": "#787878",
-    "recording": "#e63c3c",
-    "transcribing": "#f0aa28",
-    "cleaning": "#5aa0dc",
-    "error": "#c82828",
+    "idle": ("#d98a63", "#b2603d"),
+    "recording": ("#ef5a5a", "#c43535"),
+    "transcribing": ("#f2b544", "#cf8d1c"),
+    "cleaning": ("#6fb0e6", "#3f84c4"),
+    "updating": ("#d98a63", "#b2603d"),
+    "error": ("#d9534f", "#a82e2a"),
 }
 
 
-def _make_icon(color_hex: str = "#787878") -> QIcon:
-    size = 64
-    pixmap = QPixmap(size, size)
-    pixmap.fill(QColor(0, 0, 0, 0))
-    p = QPainter(pixmap)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    c = QColor(color_hex)
-    p.setBrush(c)
-    p.setPen(c)
-    p.drawEllipse(6, 6, 52, 52)
-    p.setBrush(QColor(255, 255, 255))
-    p.drawEllipse(22, 22, 20, 20)
-    p.end()
-    return QIcon(pixmap)
+def _make_icon(state: str = "idle") -> QIcon:
+    from src.ui.theme import tile_pixmap
+    top, bottom = STATE_COLORS.get(state, STATE_COLORS["idle"])
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64):
+        icon.addPixmap(tile_pixmap(size, top, bottom))
+    return icon
 
 
 class TrayIcon(QObject):
@@ -85,8 +81,7 @@ class TrayIcon(QObject):
         self._sig_set_state.emit(state)
 
     def _apply_state(self, state: str) -> None:
-        color = STATE_COLORS.get(state, "#787878")
-        self._tray.setIcon(_make_icon(color))
+        self._tray.setIcon(_make_icon(state))
         self._tray.setToolTip(f"Waveform \u2014 {state}")
 
     def stop(self) -> None:

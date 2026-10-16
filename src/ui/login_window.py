@@ -37,20 +37,20 @@ QLabel {
 }
 QLineEdit {
     background: #121212; color: #ece9e1; border: 1px solid #262626;
-    border-radius: 6px; padding: 8px 12px; font: 13px 'Segoe UI';
+    border-radius: 6px; padding: 8px 12px; font: 13px 'Inter';
 }
 QLineEdit:focus {
     border: 1px solid #c8744f;
 }
 QPushButton {
-    background: #c8744f; color: #fff; border: none; border-radius: 6px;
-    padding: 10px 24px; font: bold 13px 'Segoe UI';
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #d98a63, stop:1 #b9663f); color: #fff; border: none; border-radius: 6px;
+    padding: 10px 24px; font: bold 13px 'Inter';
 }
 QPushButton:hover {
-    background: #d4865f;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #e39a75, stop:1 #c4714a);
 }
 QPushButton:pressed {
-    background: #b5663f;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c97a54, stop:1 #a45835);
 }
 QPushButton#cancel {
     background: #262626;
@@ -71,7 +71,7 @@ class LoginWindow(QMainWindow):
         self._is_first_run = not has_account()
 
         self.setWindowTitle(APP_NAME)
-        self.setFixedSize(380, 420 if self._is_first_run else 340)
+        self.setFixedSize(380, 450 if self._is_first_run else 370)
         self.setWindowIcon(T.app_icon())
         self.setStyleSheet(_WINDOW_STYLE)
         self.setWindowFlags(
@@ -87,7 +87,8 @@ class LoginWindow(QMainWindow):
         lay.setSpacing(10)
 
         logo = QLabel()
-        logo.setPixmap(T.logo_pixmap(72, T.ACCENT))
+        logo.setPixmap(T.tile_pixmap(64))
+        logo.setFixedHeight(64)  # don't let the layout squash the tile
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(logo)
         title = QLabel(APP_NAME)
@@ -129,7 +130,7 @@ class LoginWindow(QMainWindow):
             lay.addSpacing(4)
 
         self._error_lbl = QLabel("")
-        self._error_lbl.setStyleSheet("color: #d1584f; font: 11px 'Segoe UI';")
+        self._error_lbl.setStyleSheet("color: #d1584f; font: 11px 'Inter';")
         self._error_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self._error_lbl)
         lay.addSpacing(8)

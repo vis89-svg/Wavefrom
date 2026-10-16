@@ -409,6 +409,71 @@ def paste_text(text: str) -> bool:
         return True
     if not _restore_foreground():
         return False
+    return _paste_now(text, swap_waits(0, len(text))[1])
+
+
+# A big swap (hundreds of backspaces) leaves Electron/Chromium apps such as
+# VS Code chewing through their input queue for a while after SendInput
+# returns. Both waits below scale with the size of the swap so Ctrl+V is only
+# handled once the deletes are done, and the user's clipboard is only put
+# back once the app has actually read ours. Restoring it too early made the
+# app paste the *previous* clipboard -- e.g. an earlier paragraph the user
+# had copied appearing in place of the new one.
+DRAIN_SECS_PER_DELETED_CHAR = 0.001
+MAX_DRAIN_SECS = 3.0
+RESTORE_SECS_PER_CHAR = 0.0006
+MAX_RESTORE_SECS = 3.0
+
+# Outcomes of replace_text_at_caret()
+REPLACE_OK = "ok"
+REPLACE_NO_FOCUS = "no_focus"          # nothing touched: target not foreground
+REPLACE_PASTE_FAILED = "paste_failed"  # old text deleted, new text not typed
+
+
+def swap_waits(n_deleted: int, n_pasted: int) -> tuple[float, float]:
+    """(drain wait after deleting, wait before restoring the clipboard)."""
+    drain = 0.0
+    if n_deleted > 20:
+        drain = min(MAX_DRAIN_SECS, POST_DELETE_SETTLE_SECS
+                    + n_deleted * DRAIN_SECS_PER_DELETED_CHAR)
+    restore = min(MAX_RESTORE_SECS, PASTE_SETTLE_SECS
+                  + (n_deleted + n_pasted) * RESTORE_SECS_PER_CHAR)
+    return drain, restore
+
+
+def replace_text_at_caret(n_delete: int, text: str) -> str:
+    """Delete `n_delete` chars left of the caret, then paste `text`, as one
+    focus-checked step.
+
+    Focus is confirmed once up front (nothing is touched if that fails) and
+    re-checked -- without trying to steal it again -- before pasting, so a
+    window change mid-swap can't send the paste elsewhere. Returns one of
+    REPLACE_OK / REPLACE_NO_FOCUS / REPLACE_PASTE_FAILED.
+    """
+    if n_delete <= 0 and not text:
+        return REPLACE_OK
+    if not _restore_foreground():
+        return REPLACE_NO_FOCUS
+    drain, restore = swap_waits(n_delete, len(text))
+    for _ in range(max(0, n_delete)):
+        _send_key(VK_BACK, False)
+        _send_key(VK_BACK, True)
+        time.sleep(BACKSPACE_DELAY_SECS)
+    if drain:
+        time.sleep(drain)
+    if not text:
+        return REPLACE_OK
+    if _target_hwnd and user32.GetForegroundWindow() != _target_hwnd:
+        log.error("Focus left the target window mid-swap (%s); not pasting",
+                  _describe_hwnd(_target_hwnd))
+        return REPLACE_PASTE_FAILED
+    if not _paste_now(text, restore):
+        return REPLACE_PASTE_FAILED
+    return REPLACE_OK
+
+
+def _paste_now(text: str, restore_after: float) -> bool:
+    """Clipboard paste into the (already verified) foreground window."""
     try:
         import pyperclip
     except ImportError:
@@ -427,13 +492,24 @@ def paste_text(text: str) -> bool:
     _send_key(VK_V, False)
     _send_key(VK_V, True)
     _send_key(VK_CONTROL, True)
-    time.sleep(PASTE_SETTLE_SECS)
+    time.sleep(restore_after)
     if previous is not None:
         try:
             pyperclip.copy(previous)
         except Exception:
             pass
     return True
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Leave `text` on the clipboard (fallback when typing it failed)."""
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception as e:
+        log.warning("Clipboard fallback copy failed: %s", e)
+        return False
 
 
 def _run_with_timeout(fn, timeout: float) -> bool:
@@ -499,6 +575,23 @@ class TextInjector:
     def delete_chars(self, n: int) -> bool:
         timeout = max(10.0, n * 0.05)
         return _run_with_timeout(lambda: delete_chars(n), timeout)
+
+    def replace(self, n_delete: int, text: str) -> str:
+        """Bounded replace_text_at_caret(); a timeout counts as a failed paste
+        (the delete may have happened, so the screen state is unknown)."""
+        result: list[str] = []
+
+        def run() -> bool:
+            result.append(replace_text_at_caret(n_delete, text))
+            return True
+
+        timeout = max(10.0, (n_delete + len(text)) * 0.05 + 8.0)
+        if not _run_with_timeout(run, timeout) or not result:
+            return REPLACE_PASTE_FAILED
+        return result[0]
+
+    def copy_to_clipboard(self, text: str) -> bool:
+        return copy_to_clipboard(text)
 
 
 def delete_chars(n: int) -> bool:

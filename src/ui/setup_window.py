@@ -34,11 +34,11 @@ TEST_SENTENCE = "Hello, this is my first dictation with Waveform."
 
 _STYLE = """
 QDialog { background-color: #000000; }
-QLabel { color: #a09d96; font: 12px 'Segoe UI'; }
-QLabel#stepTitle { color: #ece9e1; font: bold 13px 'Segoe UI'; }
+QLabel { color: #a09d96; font: 12px 'Inter'; }
+QLabel#stepTitle { color: #ece9e1; font: bold 13px 'Inter'; }
 QLabel#stepNum {
     background: #3a2e28; color: #ece9e1; border-radius: 12px;
-    font: bold 12px 'Segoe UI';
+    font: bold 12px 'Inter';
 }
 QLabel#stepNum[done="true"] { background: #6d8f5b; }
 QLabel#ok { color: #7fa36b; }
@@ -46,19 +46,19 @@ QLabel#error { color: #d1584f; }
 QWidget#step[active="false"] QLabel { color: #75726c; }
 QLineEdit, QPlainTextEdit {
     background: #121212; color: #ece9e1; border: 1px solid #262626;
-    border-radius: 6px; padding: 7px 10px; font: 12px 'Segoe UI';
+    border-radius: 6px; padding: 7px 10px; font: 12px 'Inter';
 }
 QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid #c8744f; }
 QLineEdit:disabled, QPlainTextEdit:disabled { color: #75726c; border-color: #121212; }
-QCheckBox { color: #a09d96; font: 11px 'Segoe UI'; spacing: 8px; }
+QCheckBox { color: #a09d96; font: 11px 'Inter'; spacing: 8px; }
 QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #262626; border-radius: 4px; background: #121212; }
 QCheckBox::indicator:checked { background: #c8744f; border-color: #c8744f; }
 QPushButton {
-    background: #c8744f; color: #fff; border: none; border-radius: 6px;
-    padding: 8px 18px; font: bold 12px 'Segoe UI';
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #d98a63, stop:1 #b9663f); color: #fff; border: none; border-radius: 6px;
+    padding: 8px 18px; font: bold 12px 'Inter';
 }
-QPushButton:hover { background: #d4865f; }
-QPushButton:pressed { background: #b5663f; }
+QPushButton:hover { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #e39a75, stop:1 #c4714a); }
+QPushButton:pressed { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c97a54, stop:1 #a45835); }
 QPushButton:disabled { background: #121212; color: #75726c; }
 QPushButton#secondary { background: #262626; }
 QPushButton#secondary:hover { background: #1c1c1c; }
@@ -114,7 +114,8 @@ class SetupWindow(QDialog):
         head = QHBoxLayout()
         head.setSpacing(12)
         logo = QLabel()
-        logo.setPixmap(T.logo_pixmap(44, T.ACCENT))
+        logo.setPixmap(T.tile_pixmap(40))
+        logo.setFixedSize(40, 40)
         head.addWidget(logo)
         title = QLabel(f"Welcome to {APP_NAME}")
         title.setStyleSheet(T.page_title_style(24))
@@ -226,7 +227,9 @@ class SetupWindow(QDialog):
         self._restyle(step)
 
     def _mark_done(self, num: QLabel) -> None:
-        num.setText("✓")
+        from src.ui.icons import line_pixmap
+        num.setText("")
+        num.setPixmap(line_pixmap("check", 14, "#ffffff"))
         num.setProperty("done", "true")
         self._restyle(num)
 

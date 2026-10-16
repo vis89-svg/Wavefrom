@@ -50,7 +50,8 @@ logging.basicConfig(
     handlers=[
         *([logging.StreamHandler(sys.stdout)] if sys.stdout is not None else []),
         logging.handlers.RotatingFileHandler(
-            LOGS_DIR / "dictation.log", maxBytes=1_000_000, backupCount=3
+            LOGS_DIR / "dictation.log", maxBytes=1_000_000, backupCount=3,
+            encoding="utf-8",  # dictated text can hold any character
         ),
     ],
 )
@@ -133,6 +134,14 @@ def _cmd_dictate(args: argparse.Namespace) -> int:
 
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication(sys.argv)
+    from src.ui.theme import app_icon, load_fonts
+    app.setWindowIcon(app_icon())  # clay tile on every window and dialog
+    family = load_fonts()  # bundled Inter; falls back to the system font
+    if family:
+        from PySide6.QtGui import QFont
+        app.setFont(QFont(family, 10))
+    else:
+        log.warning("Bundled Inter font not found; using the system font")
 
     from src.ui.login_window import show_login
     authenticated, display_name = show_login()

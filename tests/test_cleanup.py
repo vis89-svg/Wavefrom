@@ -233,3 +233,10 @@ def test_reconcile_prompt_includes_glossary(monkeypatch):
     client.reconcile([_dispute(0, "resopay", "razorpay")])
     assert "Glossary of the user's names and terms" in sent["system"]
     assert "Razorpay" in sent["system"]
+
+
+def test_normalize_hyphens_maps_only_typographic_hyphens():
+    from src.cleanup import normalize_hyphens
+    assert normalize_hyphens("hands\u2011free and old\u2010school") == "hands-free and old-school"
+    # en/em dashes and normal text are untouched
+    assert normalize_hyphens("9\u201317 \u2014 done") == "9\u201317 \u2014 done"

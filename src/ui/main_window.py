@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui import theme as T
+from src.ui.icons import nav_icon
 
 log = logging.getLogger(__name__)
 
@@ -28,16 +29,16 @@ QMainWindow {{ background-color: {T.BG}; }}
 QWidget#sidebar {{ background-color: {T.SIDEBAR}; border-right: 1px solid #141414; }}
 QPushButton#navBtn {{
     background: transparent; color: {T.TEXT_MUTED}; border: none;
-    border-radius: 8px; padding: 9px 12px; font: 14px '{T.SANS}';
+    border-radius: 8px; padding: 8px 10px; font: 14px '{T.SANS}';
     text-align: left;
 }}
-QPushButton#navBtn:hover {{ background: #141414; color: {T.TEXT}; }}
-QPushButton#navBtn:checked {{ background: {T.ACCENT_SOFT}; color: {T.TEXT}; }}
+QPushButton#navBtn:hover {{ background: #121212; color: {T.TEXT}; }}
+QPushButton#navBtn:checked {{ background: #222222; color: #ffffff; }}
 QStackedWidget {{ background: {T.BG}; }}
 {T.MENUS}
 """
 
-_ICONS = {"Dashboard": "▦", "History": "◷", "Settings": "⚙"}
+_ICONS = {"Dashboard": "dashboard", "History": "history", "Settings": "settings"}
 
 
 class MainWindow(QMainWindow):
@@ -69,8 +70,8 @@ class MainWindow(QMainWindow):
         brand.setContentsMargins(6, 0, 0, 0)
         brand.setSpacing(10)
         logo = QLabel()
-        logo.setPixmap(T.logo_pixmap(34, T.ACCENT))
-        logo.setFixedSize(34, 34)
+        logo.setPixmap(T.tile_pixmap(30))
+        logo.setFixedSize(30, 30)
         brand.addWidget(logo)
         name = QLabel("Waveform")
         name.setStyleSheet(T.page_title_style(20))
@@ -86,8 +87,12 @@ class MainWindow(QMainWindow):
                  ("Settings", settings_page)]
         self._pages = [(label, page) for label, page in pages if page is not None]
         for label, page in self._pages:
-            btn = QPushButton(f"{_ICONS.get(label, '')}   {label}")
+            btn = QPushButton(f"  {label}")
             btn.setObjectName("navBtn")
+            if label in _ICONS:
+                # Muted when unselected, white when selected (checked state).
+                btn.setIcon(nav_icon(_ICONS[label], 18, T.TEXT_MUTED, "#ffffff"))
+                btn.setIconSize(QSize(18, 18))
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda checked, b=btn, p=page: self._switch(b, p))

@@ -35,6 +35,10 @@ MAX_RECORD_SECS = 120.0
 MAX_PROMPT_CHARS = 400
 DROP_RATIO = 0.6  # full pass below this share of slice words = likely dropped audio
 MIN_WORDS_FOR_DROP_CHECK = 20
+_NOTICE_NO_FOCUS = ("Couldn't type it \u2014 Windows kept focus elsewhere. "
+                    "Text copied: press Ctrl+V.")
+_NOTICE_PASTE_FAILED = ("Couldn't finish typing. The rest is copied: "
+                        "press Ctrl+V to complete it.")
 TRIM_PAD_SECS = 0.3  # silence kept around speech when trimming the final pass
 _LOW_CONF_LOGPROB = -0.5  # avg_logprob below this marks a decode as uncertain
 _NO_SPEECH_PROB_THRESHOLD = 0.6  # Whisper's own "probably not speech" signal
@@ -542,7 +546,17 @@ class DictationEngine:
 
             now = capture_typing_context()
             window_ok, caret_ok = self._context_matches(baseline, now)
-            if window_ok and caret_ok and self._injector.inject_text(quick):
+            typed_ok = False
+            if window_ok and caret_ok:
+                self._overlay_state("updating", self._status.committed_text)
+                typed_ok = self._injector.inject_text(quick)
+                if not typed_ok:
+                    log.error("Pre-type failed (Windows kept focus elsewhere)")
+                    self._injector_copy(quick)
+                    self._notice(_NOTICE_NO_FOCUS)
+            else:
+                self._notice(self._skip_reason(window_ok, caret_ok))
+            if typed_ok:
                 typed = quick
                 self._typed_chars = len(quick)
                 log.info("Pre-typed cleaned text (%d chars)", len(quick))
@@ -643,33 +657,13 @@ class DictationEngine:
                          len(typed) - to_delete, to_delete, len(to_type),
                          self._typed_chars, window_ok, caret_ok)
                 if window_ok and caret_ok and ledger_ok:
-                    delete_ok = True
-                    if to_delete:
-                        delete_ok = self._injector.delete_chars(to_delete)
-                        self._typed_chars = max(0, self._typed_chars - to_delete)
-                    paste_ok = True
-                    if delete_ok and to_type:
-                        # Paste instead of char-by-char: this is a correction
-                        # replacing text already on screen, so a multi-second
-                        # visible retype is exactly the "removes the whole
-                        # typed one" flicker — a paste makes the swap instant.
-                        paste_ok = self._injector.paste_text(to_type)
-                        if paste_ok:
-                            self._typed_chars += len(to_type)
-                    if delete_ok and paste_ok:
-                        typed = final
+                    # Visible "don't type" state while the old text is swapped
+                    # for the clean one (several seconds on long dictations).
+                    self._overlay_state("updating", self._status.committed_text)
+                    ok, typed = self._swap_on_screen(typed, final, to_delete,
+                                                     to_type, "Correction")
+                    if ok:
                         self._typed_context = now
-                    else:
-                        # delete or paste was abandoned after timing out (see
-                        # inject.py's _run_with_timeout): the screen is now in
-                        # an unknown, possibly half-corrected state. `typed`
-                        # must NOT be set to `final` here -- that would claim
-                        # the screen shows the corrected text when it might
-                        # not, corrupting every diff after this one.
-                        log.error("Correction only partially applied "
-                                 "(delete_ok=%s paste_ok=%s); screen and "
-                                 "bookkeeping may now be out of sync",
-                                 delete_ok, paste_ok)
                 else:
                     # The screen no longer matches the engine's bookkeeping (focus
                     # moved, caret moved, or the bookkeeping claims more text than
@@ -679,6 +673,7 @@ class DictationEngine:
                     log.warning("Correction skipped (window=%s caret=%s ledger=%s); "
                                 "on-screen text left as-is", window_ok, caret_ok,
                                 ledger_ok)
+                    self._notice(self._skip_reason(window_ok, caret_ok))
             # `typed` now accurately reflects the actual on-screen text —
             # whether the correction applied, was a no-op, or was skipped.
             # Later on-demand actions (Polish/Send) must diff against this,
@@ -761,30 +756,15 @@ class DictationEngine:
                      to_delete, len(to_type), self._typed_chars,
                      window_ok, caret_ok)
             if window_ok and caret_ok and ledger_ok:
-                delete_ok = True
-                if to_delete:
-                    delete_ok = self._injector.delete_chars(to_delete)
-                    self._typed_chars = max(0, self._typed_chars - to_delete)
-                paste_ok = True
-                if delete_ok and to_type:
-                    paste_ok = self._injector.paste_text(to_type)
-                    if paste_ok:
-                        self._typed_chars += len(to_type)
-                if delete_ok and paste_ok:
-                    self._typed_text = polished
+                ok, self._typed_text = self._swap_on_screen(
+                    on_screen, polished, to_delete, to_type, "Polish")
+                if ok:
                     self._typed_context = now
-                else:
-                    # See _finalize_impl's identical guard: a timed-out delete
-                    # or paste leaves the screen in an unknown state, so
-                    # _typed_text must not be claimed as `polished` here.
-                    log.error("Polish correction only partially applied "
-                             "(delete_ok=%s paste_ok=%s); screen and "
-                             "bookkeeping may now be out of sync",
-                             delete_ok, paste_ok)
             else:
                 log.warning("Polish skipped (window=%s caret=%s ledger=%s); "
                             "on-screen text left as-is", window_ok, caret_ok,
                             ledger_ok)
+                self._notice(self._skip_reason(window_ok, caret_ok))
         self._status.committed_text = polished
         self._status.state = "idle"
         self._notify_tray()
@@ -822,32 +802,20 @@ class DictationEngine:
                 to_delete, to_type = diff_plan(self._typed_text, polished)
                 if to_delete > self._typed_chars:
                     same_spot = False  # bookkeeping doesn't add up; don't backspace blind
-            ok = True
             if same_spot:
-                delete_ok = True
-                if to_delete:
-                    delete_ok = self._injector.delete_chars(to_delete)
-                    self._typed_chars = max(0, self._typed_chars - to_delete)
-                paste_ok = True
-                if delete_ok and to_type:
-                    paste_ok = self._injector.paste_text(to_type)
-                    if paste_ok:
-                        self._typed_chars += len(to_type)
-                ok = delete_ok and paste_ok
+                ok, self._typed_text = self._swap_on_screen(
+                    self._typed_text, polished, to_delete, to_type, "Send")
             else:
-                ok = self._injector.paste_text(polished)
+                # Somewhere new: nothing of ours to replace, just insert it.
+                self._typed_chars = 0
+                ok, inserted = self._swap_on_screen("", polished, 0, polished, "Send")
                 if ok:
-                    self._typed_chars = len(polished)
+                    self._typed_text = inserted
             if ok:
-                self._typed_text = polished
                 self._typed_context = now
+                log.info("Send: typed polished text (%d chars)", len(polished))
             else:
-                # Same reasoning as _finalize_impl/polish(): a timed-out
-                # delete/paste leaves the screen state unknown, so don't
-                # claim _typed_text now matches `polished`.
-                log.error("Send only partially applied; screen and "
-                         "bookkeeping may now be out of sync")
-        log.info("Send: typed polished text (%d chars)", len(polished))
+                log.warning("Send: text not typed (%d chars)", len(polished))
         self._status.state = "idle"
         self._notify_tray()
         return polished
@@ -967,6 +935,73 @@ class DictationEngine:
         except Exception as e:
             log.warning("Full-audio transcription failed, using merged slices: %s", e)
             return ""
+
+    # ------------------------------------------------------ on-screen swaps
+    def _swap_on_screen(self, on_screen: str, new_text: str, to_delete: int,
+                        to_type: str, what: str) -> tuple[bool, str]:
+        """Replace the last `to_delete` typed chars with `to_type` as one
+        guarded step. Returns (ok, text now actually on screen).
+
+        On failure the screen is never left silently wrong: the missing text
+        goes to the clipboard and the overlay says what happened.
+        """
+        replace = getattr(self._injector, "replace", None)
+        if replace is None:  # minimal injector (no atomic swap): two steps
+            delete_ok = (not to_delete) or self._injector.delete_chars(to_delete)
+            paste_ok = delete_ok and ((not to_type) or self._injector.paste_text(to_type))
+            if delete_ok and paste_ok:
+                self._typed_chars = max(0, self._typed_chars - to_delete) + len(to_type)
+                return True, new_text
+            log.error("%s only partially applied (delete_ok=%s paste_ok=%s)",
+                      what, delete_ok, paste_ok)
+            return False, on_screen
+        from src.inject import REPLACE_NO_FOCUS, REPLACE_OK
+        outcome = replace(to_delete, to_type)
+        if outcome == REPLACE_OK:
+            self._typed_chars = max(0, self._typed_chars - to_delete) + len(to_type)
+            return True, new_text
+        if outcome == REPLACE_NO_FOCUS:
+            log.error("%s not typed: Windows kept focus elsewhere; clean text "
+                      "copied to the clipboard", what)
+            self._injector_copy(new_text)
+            self._notice(_NOTICE_NO_FOCUS)
+            return False, on_screen
+        # The old text was removed but the new text couldn't be pasted: put
+        # exactly the missing part on the clipboard so Ctrl+V completes it.
+        log.error("%s: old text removed but the paste failed; missing %d chars "
+                  "copied to the clipboard", what, len(to_type))
+        self._typed_chars = max(0, self._typed_chars - to_delete)
+        self._injector_copy(to_type)
+        self._notice(_NOTICE_PASTE_FAILED)
+        kept = len(on_screen) - to_delete
+        return False, on_screen[:kept] if kept > 0 else ""
+
+    def _injector_copy(self, text: str) -> None:
+        copy = getattr(self._injector, "copy_to_clipboard", None)
+        if copy is not None and text:
+            try:
+                copy(text)
+            except Exception as e:
+                log.warning("Clipboard fallback failed: %s", e)
+
+    @staticmethod
+    def _skip_reason(window_ok: bool, caret_ok: bool) -> str:
+        if not window_ok:
+            return "Not typed \u2014 you switched windows. Use Send or Copy."
+        if not caret_ok:
+            return "Not typed \u2014 the cursor moved. Use Send or Copy."
+        return "Not typed \u2014 the text on screen changed. Use Send or Copy."
+
+    def _notice(self, message: str) -> None:
+        """Tell the user why their text didn't land (overlay card, else toast)."""
+        overlay = self._overlay
+        if overlay is not None and hasattr(overlay, "set_notice"):
+            try:
+                overlay.set_notice(message)
+                return
+            except Exception as e:
+                log.debug("Overlay notice failed: %s", e)
+        self.notify("Waveform", message)
 
     @staticmethod
     def _speech_secs(wav_bytes: bytes | None) -> float | None:

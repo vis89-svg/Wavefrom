@@ -1,6 +1,7 @@
 """Settings page (PySide6) — replaces the Tkinter settings_dialog.
 
-Modern grouped layout with the same fields, validation, and save behavior.
+macOS-style grouped rows (label left, control right) with the same
+fields, validation, and save behavior.
 Wired into the main_window.py ``QStackedWidget`` as the second page.
 """
 from __future__ import annotations
@@ -11,10 +12,8 @@ from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
-    QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from src.config import DEFAULT_CLEANUP_MODEL
 from src.ui import theme as T
+from src.ui.icons import ToggleSwitch
 from src.version import APP_NAME
 
 log = logging.getLogger(__name__)
@@ -54,26 +54,32 @@ def _hotkey_conflict(hotkey: str) -> str | None:
 
 _PAGE_STYLE = f"""
 QWidget#settingsPage, QWidget#settingsBody {{ background-color: {T.BG}; }}
-QGroupBox {{
-    color: {T.TEXT}; background: {T.SURFACE}; border: none; border-radius: 12px;
-    margin-top: 30px; padding: 16px 18px 14px 18px;
-    font: 15px '{T.SERIF}';
+QFrame#group {{ background: {T.SURFACE}; border-radius: 12px; }}
+QFrame#divider {{ background: #1f1f1f; border: none; }}
+QLabel {{ background: transparent; }}
+QLineEdit, QComboBox {{
+    background: #1a1a1a; color: {T.TEXT}; border: 1px solid #262626;
+    border-radius: 7px; padding: 5px 10px; font: 13px '{T.SANS}';
+    selection-background-color: {T.ACCENT};
 }}
-QGroupBox::title {{
-    subcontrol-origin: margin; subcontrol-position: top left;
-    left: 2px; top: 4px; padding: 0;
+QLineEdit:focus, QComboBox:focus {{ border: 1px solid {T.ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{
+    background: {T.SURFACE}; color: {T.TEXT}; border: 1px solid {T.BORDER};
+    selection-background-color: #222222; selection-color: {T.TEXT};
 }}
-QGroupBox QLineEdit, QGroupBox QComboBox {{ background: {T.BG}; }}
-QLabel {{ color: {T.TEXT_MUTED}; font: 13px '{T.SANS}'; background: transparent; }}
-QPushButton#saveBtn {{ padding: 10px 32px; }}
-{T.INPUTS}
+QPushButton#saveBtn {{ padding: 9px 30px; }}
 {T.BUTTONS}
 {T.SCROLLBARS}
 """
 
+_ROW_TITLE = f"color: {T.TEXT}; font: 14px '{T.SANS}';"
+_ROW_HINT = f"color: {T.TEXT_FAINT}; font: 12px '{T.SANS}';"
+_GROUP_TITLE = f"color: {T.TEXT_MUTED}; font: 600 12px '{T.SANS}';"
+
 
 class SettingsPage(QWidget):
-    """Modern settings page for the main window shell."""
+    """Settings in the macOS style: grouped rows, label left, control right."""
 
     def __init__(self, settings, on_save: Callable | None = None,
                  parent: QWidget | None = None) -> None:
@@ -84,6 +90,54 @@ class SettingsPage(QWidget):
         self._on_save_callback = on_save
         self._build_ui()
 
+    # ── layout helpers ──────────────────────────────────────────────────
+    def _group(self, lay: QVBoxLayout, title: str) -> QVBoxLayout:
+        head = QLabel(title.upper())
+        head.setStyleSheet(_GROUP_TITLE)
+        head.setContentsMargins(4, 0, 0, 0)
+        lay.addSpacing(14)
+        lay.addWidget(head)
+        lay.addSpacing(6)
+        frame = QFrame()
+        frame.setObjectName("group")
+        rows = QVBoxLayout(frame)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
+        lay.addWidget(frame)
+        return rows
+
+    def _row(self, rows: QVBoxLayout, title: str, control: QWidget,
+             hint: str = "", control_width: int | None = None) -> None:
+        if rows.count():
+            line = QFrame()
+            line.setObjectName("divider")
+            line.setFixedHeight(1)
+            wrap = QHBoxLayout()
+            wrap.setContentsMargins(16, 0, 0, 0)  # Mac dividers start inset
+            wrap.addWidget(line)
+            rows.addLayout(wrap)
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(16, 10, 14, 10)
+        h.setSpacing(16)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        t = QLabel(title)
+        t.setStyleSheet(_ROW_TITLE)
+        text.addWidget(t)
+        if hint:
+            hl = QLabel(hint)
+            hl.setStyleSheet(_ROW_HINT)
+            hl.setWordWrap(True)
+            hl.setOpenExternalLinks(True)
+            text.addWidget(hl)
+        h.addLayout(text, stretch=1)
+        if control_width:
+            control.setFixedWidth(control_width)
+        h.addWidget(control, alignment=Qt.AlignmentFlag.AlignVCenter)
+        rows.addWidget(row)
+
+    # ── page ────────────────────────────────────────────────────────────
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(40, 30, 32, 20)
@@ -100,129 +154,82 @@ class SettingsPage(QWidget):
         container.setObjectName("settingsBody")
         lay = QVBoxLayout(container)
         lay.setContentsMargins(0, 0, 12, 0)
-        lay.setSpacing(4)
+        lay.setSpacing(0)
 
-        # ── Hotkeys ──────────────────────────────────────────────────────
-        g_hotkeys = QGroupBox("Hotkeys")
-        fl = QFormLayout(g_hotkeys)
-        fl.setSpacing(10)
-        fl.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        s = self._settings
 
-        self._hotkey_edit = QLineEdit(self._settings.hotkey)
-        fl.addRow("Hold hotkey:", self._hotkey_edit)
-        self._hotkey_hint = QLabel("Hold, speak, release — types once, cleaned")
-        self._hotkey_hint.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
-        fl.addRow("", self._hotkey_hint)
-
-        self._live_hotkey_edit = QLineEdit(
-            getattr(self._settings, "live_hotkey", "ctrl+alt+d"))
-        fl.addRow("Live hotkey:", self._live_hotkey_edit)
-        self._live_hint = QLabel("Tap once, then speak — types live as you talk")
-        self._live_hint.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
-        fl.addRow("", self._live_hint)
-
-        lay.addWidget(g_hotkeys)
+        # ── Dictation ────────────────────────────────────────────────────
+        rows = self._group(lay, "Dictation")
+        self._hotkey_edit = QLineEdit(s.hotkey)
+        self._row(rows, "Hold to dictate", self._hotkey_edit,
+                  "Hold, speak, release — typed once, cleaned", 170)
+        self._live_hotkey_edit = QLineEdit(getattr(s, "live_hotkey", "ctrl+alt+d"))
+        self._row(rows, "Hands-free typing", self._live_hotkey_edit,
+                  "Tap once, then speak — types live as you talk", 170)
+        self._overlay_chk = ToggleSwitch(bool(getattr(s, "overlay", True)), T.ACCENT)
+        self._row(rows, "Show floating indicator", self._overlay_chk,
+                  "The dots above the taskbar")
+        self._autostart_chk = ToggleSwitch(bool(s.autostart), T.ACCENT)
+        self._row(rows, "Start with Windows", self._autostart_chk)
 
         # ── Recognition ──────────────────────────────────────────────────
-        g_recog = QGroupBox("Recognition")
-        fl2 = QFormLayout(g_recog)
-        fl2.setSpacing(10)
-        fl2.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        rows = self._group(lay, "Recognition")
+        self._lang_edit = QLineEdit(s.language or "")
+        self._lang_edit.setPlaceholderText("auto")
+        self._row(rows, "Language", self._lang_edit,
+                  "Language code, e.g. en. Leave empty to detect automatically.", 90)
+        self._glossary_edit = QLineEdit(", ".join(s.glossary))
+        self._glossary_edit.setPlaceholderText("Names, terms…")
+        self._row(rows, "Custom words", self._glossary_edit,
+                  "Comma-separated names and terms to spell exactly", 240)
+        self._slice_edit = QLineEdit(str(getattr(s, "slice_secs", 3.0)))
+        self._row(rows, "Live preview interval", self._slice_edit,
+                  "Seconds between live updates (2–6). Lower is snappier.", 70)
 
-        self._lang_edit = QLineEdit(self._settings.language or "")
-        self._lang_edit.setPlaceholderText("blank = auto-detect")
-        fl2.addRow("Language:", self._lang_edit)
-
-        self._glossary_edit = QLineEdit(", ".join(self._settings.glossary))
-        self._glossary_edit.setPlaceholderText("comma-separated names/terms")
-        fl2.addRow("Custom words:", self._glossary_edit)
-
-        self._slice_edit = QLineEdit(str(getattr(self._settings, "slice_secs", 3.0)))
-        fl2.addRow("Slice length (2-6s):", self._slice_edit)
-
-        lay.addWidget(g_recog)
-
-        # ── AI Cleanup ───────────────────────────────────────────────────
-        g_ai = QGroupBox("AI Cleanup")
-        fl3 = QFormLayout(g_ai)
-        fl3.setSpacing(10)
-        fl3.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
+        # ── AI cleanup ───────────────────────────────────────────────────
+        rows = self._group(lay, "AI cleanup")
         self._cleanup_combo = QComboBox()
         self._cleanup_combo.addItems(["off", "correcting", "conservative", "polish"])
-        current_mode = (self._settings.cleanup_mode
-                        if self._settings.cleanup_model else "off")
+        current_mode = s.cleanup_mode if s.cleanup_model else "off"
         idx = self._cleanup_combo.findText(current_mode)
         if idx >= 0:
             self._cleanup_combo.setCurrentIndex(idx)
-        fl3.addRow("Cleanup mode:", self._cleanup_combo)
-
+        self._row(rows, "Cleanup mode", self._cleanup_combo,
+                  "How much the text is tidied after you speak", 170)
         self._polish_combo = QComboBox()
         self._polish_combo.addItems([
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
-            "qwen/qwen3.6-27b",
+            "qwen/qwen3.8-27b",
         ])
-        polish_model = getattr(self._settings, "polish_model", "openai/gpt-oss-120b")
+        polish_model = getattr(s, "polish_model", "openai/gpt-oss-120b")
         if polish_model:
             idx = self._polish_combo.findText(polish_model)
             if idx >= 0:
                 self._polish_combo.setCurrentIndex(idx)
-        fl3.addRow("Polish model:", self._polish_combo)
+        self._row(rows, "Polish model", self._polish_combo,
+                  "Used by the Polish button", 200)
+        self._tone_chk = ToggleSwitch(bool(getattr(s, "app_tone", True)), T.ACCENT)
+        self._row(rows, "Match the app's tone", self._tone_chk,
+                  "Casual in chat, formal in documents")
 
-        lay.addWidget(g_ai)
-
-        # ── Behavior ─────────────────────────────────────────────────────
-        g_behavior = QGroupBox("Behavior")
-        blay = QVBoxLayout(g_behavior)
-
-        self._overlay_chk = QCheckBox("Show live indicator (waveform near cursor)")
-        self._overlay_chk.setChecked(bool(getattr(self._settings, "overlay", True)))
-        blay.addWidget(self._overlay_chk)
-
-        self._tone_chk = QCheckBox("Match tone of the app being typed into")
-        self._tone_chk.setChecked(bool(getattr(self._settings, "app_tone", True)))
-        blay.addWidget(self._tone_chk)
-
-        self._autostart_chk = QCheckBox("Start with Windows")
-        self._autostart_chk.setChecked(self._settings.autostart)
-        blay.addWidget(self._autostart_chk)
-
-        lay.addWidget(g_behavior)
-
-        # ── API Key ──────────────────────────────────────────────────────
-        g_api = QGroupBox("Groq API Key")
-        fl4 = QFormLayout(g_api)
-        fl4.setSpacing(10)
-
+        # ── Groq API key ─────────────────────────────────────────────────
+        rows = self._group(lay, "Groq API key")
         self._key_edit = QLineEdit()
         self._key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key_edit.setPlaceholderText("Enter Groq API key")
-        fl4.addRow("API key:", self._key_edit)
-
-        self._key_hint = QLabel(
-            'Don\'t have a key? '
-            f'<a style="color:{T.ACCENT_HOVER}; text-decoration:none" '
-            'href="https://console.groq.com/keys">Get a free one &rarr;</a>'
-        )
-        self._key_hint.setOpenExternalLinks(True)
-        fl4.addRow("", self._key_hint)
-
-        key_row = QHBoxLayout()
-        self._show_key_chk = QCheckBox("Show")
+        self._key_edit.setPlaceholderText("Paste a new key to replace it")
+        self._row(rows, "API key", self._key_edit,
+                  f'Don\'t have one? <a style="color:{T.ACCENT_HOVER}; '
+                  'text-decoration:none" href="https://console.groq.com/keys">'
+                  'Get a free key &rarr;</a>', 240)
+        self._show_key_chk = ToggleSwitch(False, T.ACCENT)
         self._show_key_chk.toggled.connect(
             lambda on: self._key_edit.setEchoMode(
                 QLineEdit.EchoMode.Normal if on
                 else QLineEdit.EchoMode.Password))
-        key_row.addWidget(self._show_key_chk)
-        key_row.addStretch()
-        fl4.addRow("", key_row)
+        self._row(rows, "Show key", self._show_key_chk)
 
-        lay.addWidget(g_api)
-
-        lay.addStretch()
-
-        # ── Save button ──────────────────────────────────────────────────
+        lay.addSpacing(18)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self._save_btn = QPushButton("Save")
@@ -230,6 +237,7 @@ class SettingsPage(QWidget):
         self._save_btn.clicked.connect(self._on_save)
         btn_row.addWidget(self._save_btn)
         lay.addLayout(btn_row)
+        lay.addStretch()
 
         scroll.setWidget(container)
         outer.addWidget(scroll, stretch=1)

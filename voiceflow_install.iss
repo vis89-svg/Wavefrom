@@ -4,7 +4,7 @@
 [Setup]
 ; Basic info
 AppName=Waveform
-AppVersion=1.1.0
+AppVersion=1.2.0
 AppPublisher=XgenF1
 ; No admin/UAC prompt; installs to the current user's Program Files equivalent
 PrivilegesRequired=lowest

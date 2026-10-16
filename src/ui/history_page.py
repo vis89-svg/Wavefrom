@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 
 import pyperclip
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui import theme as T
+from src.ui.icons import button_icon
 
 log = logging.getLogger(__name__)
 
@@ -89,9 +90,9 @@ class _Card(QFrame):
         self._time.setStyleSheet(T.label_style(T.TEXT_FAINT, 12))
         top.addWidget(self._time)
         top.addStretch()
-        self._copy_btn = self._action("⧉  Copy", "Copy to clipboard", self._copy)
-        self._del_btn = self._action("\U0001f5d1  Delete", "Delete this dictation",
-                                     self._delete)
+        self._copy_btn = self._action("Copy", "Copy to clipboard", self._copy, "copy")
+        self._del_btn = self._action("Delete", "Delete this dictation",
+                                     self._delete, "trash")
         top.addWidget(self._copy_btn)
         top.addWidget(self._del_btn)
         lay.addLayout(top)
@@ -107,8 +108,10 @@ class _Card(QFrame):
         lay.addWidget(self._text)
         self._apply_collapse()
 
-    def _action(self, text: str, tip: str, slot) -> QPushButton:
-        b = QPushButton(text)
+    def _action(self, text: str, tip: str, slot, icon: str) -> QPushButton:
+        b = QPushButton(" " + text)
+        b.setIcon(button_icon(icon, 14, T.TEXT_MUTED, T.TEXT))
+        b.setIconSize(QSize(14, 14))
         b.setProperty("kind", "ghost")
         b.setToolTip(tip)
         b.setFixedHeight(26)
@@ -146,10 +149,15 @@ class _Card(QFrame):
     def _copy(self) -> None:
         try:
             pyperclip.copy(self._entry["text"])
-            self._copy_btn.setText("✓  Copied")
-            QTimer.singleShot(1500, lambda: self._copy_btn.setText("⧉  Copy"))
+            self._copy_btn.setText(" Copied")
+            self._copy_btn.setIcon(button_icon("check", 14, T.SUCCESS))
+            QTimer.singleShot(1500, self._reset_copy)
         except Exception as e:
             log.warning("Clipboard copy failed: %s", e)
+
+    def _reset_copy(self) -> None:
+        self._copy_btn.setText(" Copy")
+        self._copy_btn.setIcon(button_icon("copy", 14, T.TEXT_MUTED, T.TEXT))
 
     def _delete(self) -> None:
         self._on_delete(self._entry["id"])
